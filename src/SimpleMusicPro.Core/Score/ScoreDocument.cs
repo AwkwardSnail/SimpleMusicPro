@@ -15,6 +15,12 @@ public sealed record RhythmHit(int Bar, int Position, int Length, bool Rest = fa
 /// </summary>
 public sealed class RhythmLane
 {
+    /// <summary>The shortest strum, in sixteenths: an eighth note, for now. Strums start on an eighth-note grid.</summary>
+    public const int Shortest = 2;
+
+    /// <summary>The lengths a strum can be, in sixteenths: an eighth, a quarter, a dotted quarter, a half, a dotted half, a whole.</summary>
+    public static readonly IReadOnlyList<int> Lengths = [2, 4, 6, 8, 12, 16];
+
     private readonly List<RhythmHit> _hits = [];
 
     /// <summary>Written at the left of the first line, for example "Gtrs. 1 &amp; 2 (Acoustic)".</summary>
@@ -35,7 +41,8 @@ public sealed class RhythmLane
     public RhythmHit Add(int bar, int position, int length, int barLength, bool rest = false, bool accent = false)
     {
         if (position < 0 || position >= barLength) throw new ArgumentOutOfRangeException(nameof(position), "The place must be inside the bar.");
-        if (length <= 0) throw new ArgumentOutOfRangeException(nameof(length), "A strum needs a length.");
+        if (position % Shortest != 0) throw new ArgumentOutOfRangeException(nameof(position), "A strum starts on an eighth note.");
+        if (!Lengths.Contains(length)) throw new ArgumentOutOfRangeException(nameof(length), "A strum is an eighth, a quarter, a half or a whole note, or a dotted quarter or half.");
         length = Math.Min(length, barLength - position);
         int end = position + length;
         for (int i = _hits.Count - 1; i >= 0; i--)
@@ -48,6 +55,15 @@ public sealed class RhythmLane
         var hit = new RhythmHit(bar, position, length, rest, accent);
         _hits.Add(hit);
         return hit;
+    }
+
+    /// <summary>
+    /// Puts back strums as they were saved, without the checks of <see cref="Add"/>: a strum shortened by a later
+    /// one can have a length there is no single symbol for (it is written as tied lengths).
+    /// </summary>
+    public void Restore(IEnumerable<RhythmHit> hits)
+    {
+        foreach (var h in hits) if (h.Length > 0 && h.Position >= 0 && At(h.Bar, h.Position) is null) _hits.Add(h);
     }
 
     /// <summary>Takes away the strum or rest sounding at a place; false when there is none.</summary>
@@ -86,4 +102,7 @@ public sealed class ScoreDocument
 
     /// <summary>The rhythm staff above the voice staff, or null for none.</summary>
     public RhythmLane? Rhythm { get; set; }
+
+    /// <summary>Chords stand on the beat: no closer together than a quarter note, for now (in sixteenths).</summary>
+    public const int ChordStep = 4;
 }

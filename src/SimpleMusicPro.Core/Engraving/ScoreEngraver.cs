@@ -12,6 +12,11 @@ public sealed record ScoreOptions
     public double Margin { get; init; } = 42;
     /// <summary>The gap between two lines of the staff, in points. Everything else is drawn in proportion to it.</summary>
     public double StaffSpace { get; init; } = 5.6;
+    /// <summary>
+    /// Whether several empty bars in a row are printed as one multi-bar rest. True for a finished score; false
+    /// while editing, so that every bar is there to put strums and chords in.
+    /// </summary>
+    public bool JoinEmptyBars { get; init; } = true;
 
     // Kept for the simple overload that takes bars alone.
     public string Title { get; init; } = "";
@@ -89,7 +94,7 @@ public static class ScoreEngraver
         double left = options.Margin, right = options.PageWidth - options.Margin;
         bool rhythm = score.Rhythm is not null, voice = score.ShowVoice || !rhythm;
 
-        var lines = Plan(score, voice, ss, right - left);
+        var lines = Plan(score, voice, ss, right - left, options.JoinEmptyBars);
         // Vertical layout of a line: the rhythm staff (if any) above the voice staff.
         double rhythmHeight = rhythm ? 6.5 * ss : 0, voiceHeight = voice ? 11.5 * ss : 0;
         double lineHeight = 3.5 * ss + rhythmHeight + voiceHeight + 1.5 * ss;
@@ -190,7 +195,7 @@ public static class ScoreEngraver
 
     private static double StepY(double staffTop, double ss, int steps) => staffTop + 4 * ss - steps * ss / 2;
 
-    private static List<LinePlan> Plan(ScoreDocument score, bool voice, double ss, double width)
+    private static List<LinePlan> Plan(ScoreDocument score, bool voice, double ss, double width, bool join)
     {
         var all = score.Bars;
         var placed = new List<PlacedBar>();
@@ -199,7 +204,7 @@ public static class ScoreEngraver
         {
             var m = all[k];
             int run = 1;
-            if (Empty(k) && !m.Pickup)
+            if (join && Empty(k) && !m.Pickup)
                 while (k + run < all.Count && Empty(k + run) && all[k + run].Numerator == m.Numerator && all[k + run].Denominator == m.Denominator && all[k + run].KeySharps == m.KeySharps) run++;
             if (run < 2) { placed.Add(PlaceBar(m, k, voice, score.Rhythm)); continue; }
             placed.Add(new PlacedBar { Measure = m, Index = k, MultiRest = run, FixedWidth = 10, StretchWidth = 0 });
