@@ -148,6 +148,8 @@ public static class ScoreEngraver
     {
         public int Position, Length;
         public bool Rest, Accent, Beamed;
+        /// <summary>One part of a strum written as tied lengths, with more of it after.</summary>
+        public bool TiedToNext;
         public double Fixed, Stretch;
         public int Flags => Length switch { 1 => 2, 2 or 3 => 1, _ => 0 };
         public bool Dotted => Length is 3 or 6 or 12;
@@ -315,13 +317,22 @@ public static class ScoreEngraver
                 // lengths that make it up.
                 var parts = Quantizer.Split(hit.Position, Math.Min(hit.Length, measure.Length - hit.Position), measure.Length, beat);
                 for (int k = 0; k < parts.Count; k++)
-                    bar.Hits.Add(new PlacedHit { Position = parts[k].Start, Length = parts[k].Length, Rest = hit.Rest, Accent = hit.Accent && k == 0 });
+                    bar.Hits.Add(new PlacedHit { Position = parts[k].Start, Length = parts[k].Length, Rest = hit.Rest, Accent = hit.Accent && k == 0, TiedToNext = !hit.Rest && k < parts.Count - 1 });
             }
         }
 
         // One column for each moment something starts, in either staff; its room is the widest thing there.
         var positions = bar.Items.Where(p => !(p.Item.IsRest && p.Item.Length == nominal)).Select(p => p.Item.Start)
             .Concat(bar.Hits.Select(h => h.Position)).Distinct().Order().ToList();
+        // The rhythm staff keeps room where a strum can still go: each beat where nothing sounds, and the end of each
+        // strum when nothing follows it at once.
+        if (rhythm is not null)
+        {
+            bool Free(int pos) => pos < measure.Length && !bar.Hits.Any(h => h.Position <= pos && pos < h.Position + h.Length);
+            var open = Enumerable.Range(0, (measure.Length + measure.Beat - 1) / measure.Beat).Select(b => b * measure.Beat)
+                .Concat(bar.Hits.Select(h => h.Position + h.Length)).Where(Free);
+            positions = positions.Concat(open).Distinct().Order().ToList();
+        }
         if (positions.Count == 0) positions.Add(0);
         double fixedX = 1.0, stretchX = 0;
         for (int c = 0; c < positions.Count; c++)
@@ -495,6 +506,10 @@ public static class ScoreEngraver
                     itemMaps.Add(new ItemMap(page, LaneKind.Rhythm, b.Index, h.Position, h.Length, bounds));
                 }
                 foreach (var g in b.HitBeams) DrawHitBeam(canvas, g, h => Xof(h.Fixed, h.Stretch), line.RhythmBase, ss);
+                // A strum written as tied lengths: a tie below the slashes, from one part to the next.
+                for (int k = 0; k + 1 < b.Hits.Count; k++)
+                    if (b.Hits[k].TiedToNext)
+                        DrawHitTie(canvas, Xof(b.Hits[k].Fixed, b.Hits[k].Stretch), Xof(b.Hits[k + 1].Fixed, b.Hits[k + 1].Stretch), line.RhythmBase, ss);
             }
             barX += width;
         }
@@ -676,7 +691,7 @@ public static class ScoreEngraver
             if (h.Flags > 0) Place(canvas, h.Flags == 1 ? "flag8thUp" : "flag16thUp", stemX - Stem * ss / 2, end, ss);
         }
         if (h.Dotted) Place(canvas, "augmentationDot", x + w + 0.35 * ss, baseY - 0.4 * ss, ss);
-        if (h.Accent) Place(canvas, "articAccentBelow", x + (w - Bravura.Get("articAccentBelow").Advance * ss) / 2, baseY + half + 1.5 * ss, ss);
+        if (h.Accent) Place(canvas, "articAccentBelow", x + (w - Bravura.Get("articAccentBelow").Advance * ss) / 2, baseY + half + (h.TiedToNext ? 2.2 : 1.5) * ss, ss);
         return new PdfRect(x - 0.3 * ss, baseY - StemLength * ss - 0.3 * ss, w + 0.6 * ss, (StemLength + 1.0) * ss + half);
     }
 
@@ -687,6 +702,17 @@ public static class ScoreEngraver
         double StemX(PlacedHit h) => xOf(h) + SlashWidth * ss - Stem * ss;
         foreach (var h in g) canvas.Line(new PdfPoint(StemX(h) + Stem * ss / 2, baseY - half), new PdfPoint(StemX(h) + Stem * ss / 2, end), Stem * ss);
         BeamBars(canvas, g.Select(h => (StemX(h), h.Flags)).ToList(), _ => end, true, ss);
+    }
+
+    private static void DrawHitTie(PageCanvas canvas, double x1, double x2, double baseY, double ss)
+    {
+        double a = x1 + (SlashWidth / 2 + 0.2) * ss, b = x2 + (SlashWidth / 2 - 0.2) * ss, y = baseY + 0.8 * ss;
+        double w = b - a, h = Math.Clamp(w * 0.1, 0.5 * ss, 0.8 * ss), t = -0.2 * ss;
+        canvas.Path([
+            new('M', new PdfPoint(a, y)),
+            new('C', new PdfPoint(b, y), new PdfPoint(a + w * 0.2, y + h * 1.33), new PdfPoint(b - w * 0.2, y + h * 1.33)),
+            new('C', new PdfPoint(a, y), new PdfPoint(b - w * 0.2, y + h * 1.33 + t), new PdfPoint(a + w * 0.2, y + h * 1.33 + t)),
+            new('Z', default)], Ink);
     }
 
     private static void DrawTies(PageCanvas canvas, PlacedItem p, double x1, double x2, double top, double ss, bool offLine)

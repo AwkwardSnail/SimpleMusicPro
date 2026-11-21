@@ -30,7 +30,18 @@ public class EditingTests
         Assert.Equal([(0, 0), (0, 4), (0, 8), (0, 12), (1, 0), (1, 4), (1, 8), (1, 12)], plus.Select(p => (p.Bar, p.Position)).ToArray());
         score.Rhythm!.Add(0, 0, 4, 16);
         plus = Placeholders.ForRhythm(score, null, null);
-        Assert.DoesNotContain(plus, p => p.Bar == 0);   // a bar with strums in it shows no beat signs any more
+        // Where the strum sounds there is none any more; the beats still free, and the strum's end, keep theirs.
+        Assert.Equal([(0, 4), (0, 8), (0, 12)], plus.Where(p => p.Bar == 0).Select(p => (p.Bar, p.Position)).ToArray());
+    }
+
+    [Fact]
+    public void A_gap_left_in_a_bar_can_still_be_filled()
+    {
+        var score = TwoBars();
+        score.Rhythm!.Add(0, 0, 2, 16);                   // an eighth on beat 1
+        score.Rhythm.Add(0, 4, 8, 16);                    // a half from beat 2 to beat 3
+        var plus = Placeholders.ForRhythm(score, null, null).Where(p => p.Bar == 0).Select(p => p.Position).ToArray();
+        Assert.Equal([2, 12], plus);                      // after the eighth, and the fourth beat
     }
 
     [Fact]
@@ -47,10 +58,11 @@ public class EditingTests
     public void A_selected_note_offers_a_plus_at_its_moment_rounded_to_the_eighth()
     {
         var score = TwoBars();
-        score.Rhythm!.Add(1, 0, 4, 16);                   // so bar 1 shows no beat signs of its own
-        var plus = Placeholders.ForRhythm(score, (1, 9), null);
-        Assert.Contains(plus, p => p.Lane == LaneKind.Rhythm && p.Bar == 1 && p.Position == 8);
-        Assert.DoesNotContain(Placeholders.ForRhythm(score, (1, 0), null), p => p.Bar == 1); // a strum is there already
+        score.Rhythm!.Add(1, 0, 8, 16);                   // a half on beats 1 and 2
+        Assert.DoesNotContain(Placeholders.ForRhythm(score, null, null), p => p.Bar == 1 && p.Position == 10);
+        var plus = Placeholders.ForRhythm(score, (1, 11), null);
+        Assert.Contains(plus, p => p.Lane == LaneKind.Rhythm && p.Bar == 1 && p.Position == 10);
+        Assert.DoesNotContain(Placeholders.ForRhythm(score, (1, 3), null), p => p.Bar == 1 && p.Position == 2); // a strum is there already
     }
 
     [Fact]
@@ -98,8 +110,8 @@ public class EditingTests
         var score = new ScoreDocument { Bars = Quantizer.Voice(midi, track), Rhythm = new RhythmLane() };
         using var editing = ScoreEngraver.Engrave(score, new ScoreOptions { JoinEmptyBars = false });
         using var finished = ScoreEngraver.Engrave(score, new ScoreOptions());
-        Assert.Equal(12, editing.Bars.Select(b => b.X).Distinct().Count());     // each bar has a place of its own
-        Assert.True(finished.Bars.Select(b => b.X).Distinct().Count() < 12);    // the ten empty ones share one
+        Assert.Equal(12, editing.Bars.Count(b => b.Columns.Count > 0));         // each bar has places of its own
+        Assert.True(finished.Bars.Count(b => b.Columns.Count > 0) < 12);        // the empty ones share one multi-bar rest
     }
 
     [Fact]

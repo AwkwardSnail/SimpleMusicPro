@@ -162,6 +162,14 @@ FROM, OUT OF THE USE OR INABILITY TO USE THE FONT SOFTWARE OR FROM
 OTHER DEALINGS IN THE FONT SOFTWARE.
 
 
+Atkinson Hyperlegible Next
+--------------------------
+https://www.brailleinstitute.org/freefont/
+The typeface of the app's own text. Copyright 2020 Braille Institute of
+America, Inc. Offered under the SIL Open Font License, Version 1.1; the
+licence is in the file Fonts\OFL.txt beside this one.
+
+
 .NET
 ----
 https://github.com/dotnet/runtime, https://github.com/dotnet/wpf

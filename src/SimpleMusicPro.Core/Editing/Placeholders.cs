@@ -8,8 +8,8 @@ public sealed record Placeholder(LaneKind Lane, int Bar, int Position);
 
 /// <summary>
 /// Where the "+" signs go, that add a strum with a click: at the moment of the note selected in another staff,
-/// just after the strum added last (so a pattern goes in one click after another), and on each beat of a bar that
-/// has no strums yet. Never where a strum already sounds.
+/// just after each strum (so a pattern goes in one click after another), and on each beat where nothing sounds yet.
+/// Never where a strum already sounds.
 /// </summary>
 public static class Placeholders
 {
@@ -34,12 +34,15 @@ public static class Placeholders
             if (h.End < score.Bars[h.Bar].Length) Offer(h.Bar, h.End);
             else Offer(h.Bar + 1, 0);
         }
+        // Every beat where nothing sounds yet, and the end of each strum when nothing follows it at once: so an
+        // empty bar gets one on each beat, and a gap left in a bar can still be filled.
         for (int bar = 0; bar < score.Bars.Count; bar++)
         {
-            if (lane.InBar(bar).Any()) continue;
             var m = score.Bars[bar];
+            foreach (var strum in lane.InBar(bar)) Offer(bar, strum.End);
             for (int beat = 0; beat < m.Length; beat += m.Beat) Offer(bar, beat);
         }
+        found.Sort((a, b) => a.Bar != b.Bar ? a.Bar.CompareTo(b.Bar) : a.Position.CompareTo(b.Position));
         return found;
     }
 }
