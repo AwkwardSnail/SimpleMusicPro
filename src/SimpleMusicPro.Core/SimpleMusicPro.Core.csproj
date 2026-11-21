@@ -1,0 +1,16 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <RootNamespace>SimpleMusicPro</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- The PDF engine, in its own repository and a git submodule here: clone with recurse-submodules,
+         or fetch it afterwards with git submodule update and its init option. -->
+    <ProjectReference Include="..\..\engine\src\PdfEditor.Core\PdfEditor.Core.csproj" />
+  </ItemGroup>
+
+</Project>
