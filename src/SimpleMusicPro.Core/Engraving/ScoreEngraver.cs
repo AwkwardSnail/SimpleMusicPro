@@ -4,25 +4,64 @@ using SimpleMusicPro.Score;
 
 namespace SimpleMusicPro.Engraving;
 
-/// <summary>What a printed score looks like and says at the top.</summary>
+/// <summary>What a printed score looks like.</summary>
 public sealed record ScoreOptions
 {
-    public string Title { get; init; } = "";
-    /// <summary>Under the title, at the right: composer or the like.</summary>
-    public string Subtitle { get; init; } = "";
-    /// <summary>Quarter notes to the minute, shown above the first bar; 0 shows none.</summary>
-    public double Tempo { get; init; }
     public double PageWidth { get; init; } = 595.28;
     public double PageHeight { get; init; } = 841.89;
     public double Margin { get; init; } = 42;
     /// <summary>The gap between two lines of the staff, in points. Everything else is drawn in proportion to it.</summary>
     public double StaffSpace { get; init; } = 5.6;
+
+    // Kept for the simple overload that takes bars alone.
+    public string Title { get; init; } = "";
+    public string Subtitle { get; init; } = "";
+    public double Tempo { get; init; }
+}
+
+/// <summary>Which staff of the stack something belongs to.</summary>
+public enum LaneKind { Rhythm, Voice }
+
+/// <summary>Where a bar was drawn: its page, its place, and where in it each moment that has something at it lies.</summary>
+/// <param name="Bar">The bar's index in the score's list of bars.</param>
+/// <param name="Columns">For each place in the bar (in sixteenths) that has a note, rest or strum in some staff, the x it was drawn at.</param>
+public sealed record BarMap(int Page, int Bar, int Length, double X, double Width, IReadOnlyList<(int Position, double X)> Columns)
+{
+    /// <summary>The x of a place in the bar: a column's own x, or a point between the columns either side of it.</summary>
+    public double XOf(int position)
+    {
+        if (Columns.Count == 0) return X + Width * position / Math.Max(1, Length);
+        var before = Columns.LastOrDefault(c => c.Position <= position);
+        var after = Columns.FirstOrDefault(c => c.Position > position);
+        if (before == default) return Columns[0].X;
+        if (before.Position == position) return before.X;
+        double endX = after == default ? X + Width - 1.2 : after.X;
+        int endPos = after == default ? Length : after.Position;
+        return before.X + (endX - before.X) * (position - before.Position) / Math.Max(1, endPos - before.Position);
+    }
+}
+
+/// <summary>Where a staff of the stack was drawn on a line: the band of the page it takes, top and bottom.</summary>
+public sealed record LaneBand(int Page, int FirstBar, int LastBar, LaneKind Lane, double Top, double Bottom);
+
+/// <summary>A note, rest or strum as drawn, for finding it again under a click.</summary>
+public sealed record ItemMap(int Page, LaneKind Lane, int Bar, int Position, int Length, PdfRect Bounds);
+
+/// <summary>A score drawn as a PDF, with a map of where everything landed.</summary>
+public sealed class EngravedScore : IDisposable
+{
+    public required PdfDocument Pdf { get; init; }
+    public required IReadOnlyList<BarMap> Bars { get; init; }
+    public required IReadOnlyList<LaneBand> Bands { get; init; }
+    public required IReadOnlyList<ItemMap> Items { get; init; }
+    public void Dispose() => Pdf.Dispose();
 }
 
 /// <summary>
-/// Draws bars of notes as a printed score: a staff with its clef, key and time signature, noteheads, stems,
-/// flags and beams, accidentals, dots, ties and rests, barlines and bar numbers, laid out in lines that fill the
-/// page width and in pages. The symbols are Bravura's, drawn as vector shapes.
+/// Draws a score as a printed page: each line a stack of staves (a rhythm staff of slashes above a voice staff
+/// with its clef, key and time signature, noteheads, stems, flags and beams, accidentals, dots, ties and rests),
+/// with the staves of a line spaced together so that what happens at the same moment stands in one column.
+/// The symbols are Bravura's, drawn as vector shapes.
 /// </summary>
 public static class ScoreEngraver
 {
@@ -31,141 +70,171 @@ public static class ScoreEngraver
     private const double BeamThickness = 0.5, BeamGap = 0.25, StemLength = 3.5;
     private const int BottomLineDiatonic = 4 * 7 + 2; // E4: the bottom line of a treble staff
     private const int MiddleLineDiatonic = 34;         // B4
+    private const double SlashWidth = 1.1;             // a rhythm slash, in staff spaces
 
     private static readonly PathStyle Ink = new() { Fill = PdfColor.Black };
 
-    /// <summary>A score of one voice staff, made into a PDF.</summary>
+    /// <summary>A score of one voice staff, made into a PDF (kept for callers that have bars alone).</summary>
     public static PdfDocument Engrave(IReadOnlyList<Measure> measures, ScoreOptions options)
+    {
+        var score = new ScoreDocument { Bars = measures, Title = options.Title, Subtitle = options.Subtitle, Tempo = options.Tempo };
+        return Engrave(score, options).Pdf;
+    }
+
+    /// <summary>A score made into a PDF, with the map of where its bars, staves and notes landed.</summary>
+    public static EngravedScore Engrave(ScoreDocument score, ScoreOptions options)
     {
         var doc = PdfDocument.Create();
         double ss = options.StaffSpace;
-        double contentLeft = options.Margin, contentRight = options.PageWidth - options.Margin;
+        double left = options.Margin, right = options.PageWidth - options.Margin;
+        bool rhythm = score.Rhythm is not null, voice = score.ShowVoice || !rhythm;
 
-        // The first line starts with clef, key and time signature; the others with clef and key.
-        var plans = Plan(measures, options, contentRight - contentLeft);
-        var pages = new List<List<SystemPlan>> { new() };
-        double y = options.Margin + (HasHeading(options) ? 64 : 0) + 3.5 * ss;
-        double systemHeight = (4 + 7.5) * ss, gap = 3.5 * ss;
-        foreach (var plan in plans)
+        var lines = Plan(score, voice, ss, right - left);
+        // Vertical layout of a line: the rhythm staff (if any) above the voice staff.
+        double rhythmHeight = rhythm ? 6.5 * ss : 0, voiceHeight = voice ? 11.5 * ss : 0;
+        double lineHeight = 3.5 * ss + rhythmHeight + voiceHeight + 1.5 * ss;
+        double headingHeight = HasHeading(score) ? 64 : 0;
+        var pages = new List<List<LinePlan>> { new() };
+        double y = options.Margin + headingHeight;
+        foreach (var line in lines)
         {
-            if (y + 4 * ss + 4 * ss > options.PageHeight - options.Margin && pages[^1].Count > 0)
-            {
-                pages.Add([]);
-                y = options.Margin + 3.5 * ss;
-            }
-            plan.StaffTop = y;
-            pages[^1].Add(plan);
-            y += systemHeight + gap;
+            if (y + lineHeight > options.PageHeight - options.Margin && pages[^1].Count > 0) { pages.Add([]); y = options.Margin; }
+            line.Top = y;
+            line.RhythmBase = y + 3.5 * ss + 4.2 * ss;                         // the middle of the slashes
+            line.StaffTop = y + 3.5 * ss + rhythmHeight + (rhythm ? 2.0 * ss : 0);
+            pages[^1].Add(line);
+            y += lineHeight;
         }
 
+        var bars = new List<BarMap>();
+        var bands = new List<LaneBand>();
+        var items = new List<ItemMap>();
         for (int p = 0; p < pages.Count; p++)
         {
             doc.AddPage(options.PageWidth, options.PageHeight);
             int page = doc.PageCount - 1;
-            var systems = pages[p];
-            int number = p + 1;
+            var onPage = pages[p];
             doc.Draw(page, canvas =>
             {
-                if (p == 0) DrawHeading(canvas, options);
-                foreach (var system in systems) DrawSystem(canvas, system, measures, options, contentLeft, contentRight);
+                if (page == 0) DrawHeading(canvas, score, options);
+                foreach (var line in onPage)
+                    DrawLine(canvas, page, line, score, voice, rhythm, options, left, bars, bands, items);
             });
         }
-        return doc;
+        return new EngravedScore { Pdf = doc, Bars = bars, Bands = bands, Items = items };
     }
 
-    private static bool HasHeading(ScoreOptions o) => o.Title.Length > 0 || o.Subtitle.Length > 0 || o.Tempo > 0;
+    private static bool HasHeading(ScoreDocument s) => s.Title.Length > 0 || s.Subtitle.Length > 0 || s.Tempo > 0;
 
-    // ------------------------------------------------------------------ placing notes along a bar
+    // ------------------------------------------------------------------ placing things along a bar
 
-    /// <summary>A note or chord placed in a bar.</summary>
+    /// <summary>A note, chord or rest of the voice staff placed in a bar.</summary>
     private sealed class PlacedItem
     {
         public required NotatedItem Item { get; init; }
-        public int Index { get; init; }
-        /// <summary>Where the left edge of the notehead is: a part that does not stretch, and a part that does, from the bar's start.</summary>
         public double Fixed, Stretch;
-        public bool StemUp;
+        public bool StemUp, Beamed;
         public List<(Pitch Pitch, double Shift, string? Accidental, double AccidentalOffset)> Notes = [];
-        /// <summary>Whether the stem belongs to a beam (set when the bar is laid out).</summary>
-        public bool Beamed;
+        public double Pre, Body;
     }
 
-    private sealed class PlacedMeasure
+    /// <summary>A strum or rest of the rhythm staff placed in a bar.</summary>
+    private sealed class PlacedHit
+    {
+        public int Position, Length;
+        public bool Rest, Accent, Beamed;
+        public double Fixed, Stretch;
+        public int Flags => Length switch { 1 => 2, 2 or 3 => 1, _ => 0 };
+        public bool Dotted => Length is 3 or 6 or 12;
+        public int Value => Dotted ? Length * 2 / 3 : Length;
+    }
+
+    private sealed class PlacedBar
     {
         public required Measure Measure { get; init; }
+        public int Index;
         public List<PlacedItem> Items { get; } = [];
+        public List<PlacedHit> Hits { get; } = [];
+        public List<(int Position, double Fixed, double Stretch)> Columns { get; } = [];
         public double FixedWidth, StretchWidth;
         public double NaturalWidth => FixedWidth + StretchWidth;
-        /// <summary>More than 1 for several whole-bar rests in a row, written as one.</summary>
+        public List<List<PlacedItem>> Beams { get; } = [];
+        public List<bool> BeamUp { get; } = [];
+        public List<List<PlacedHit>> HitBeams { get; } = [];
+        /// <summary>More than 1 for several empty bars in a row, written as one.</summary>
         public int MultiRest = 1;
-        public int LastNumber => Measure.Number + MultiRest - 1;
-        public List<BeamGroup> Beams { get; } = [];
+        public int LastIndex => Index + MultiRest - 1;
     }
 
-    private sealed class BeamGroup
+    private sealed class LinePlan
     {
-        public List<PlacedItem> Items { get; } = [];
-        public bool StemUp;
-    }
-
-    private sealed class SystemPlan
-    {
-        public List<PlacedMeasure> Measures { get; } = [];
-        public int FirstMeasureNumber;
+        public List<PlacedBar> Bars { get; } = [];
         public bool ShowTimeSignature;
         public double PrefixWidth;
         public double Scale = 1;
-        public double StaffTop;
+        public double Top, RhythmBase, StaffTop;
     }
 
-    /// <summary>How far a note of a length stretches the bar after it (beyond its own head), in staff spaces.</summary>
-    private static double Spacing(int length) => length switch { 1 => 1.5, 2 => 2.1, 3 => 2.7, 4 => 3.1, 6 => 3.9, 8 => 4.6, 12 => 5.4, _ => 6.2 };
+    /// <summary>How much room a stretch of time takes after a moment, beyond what is drawn there, in staff spaces.</summary>
+    private static double Spacing(int sixteenths)
+    {
+        (double At, double Room)[] table = [(1, 1.5), (2, 2.1), (4, 3.1), (8, 4.6), (16, 6.2), (32, 7.6)];
+        double g = Math.Max(1, sixteenths), log = Math.Log2(g);
+        for (int i = 0; i + 1 < table.Length; i++)
+        {
+            double a = Math.Log2(table[i].At), b = Math.Log2(table[i + 1].At);
+            if (log <= b) return table[i].Room + (table[i + 1].Room - table[i].Room) * (log - a) / (b - a);
+        }
+        return table[^1].Room;
+    }
 
     private static double StepY(double staffTop, double ss, int steps) => staffTop + 4 * ss - steps * ss / 2;
 
-    private static List<SystemPlan> Plan(IReadOnlyList<Measure> measures, ScoreOptions options, double width)
+    private static List<LinePlan> Plan(ScoreDocument score, bool voice, double ss, double width)
     {
-        double ss = options.StaffSpace;
-        var placed = new List<PlacedMeasure>();
-        for (int k = 0; k < measures.Count; k++)
+        var all = score.Bars;
+        var placed = new List<PlacedBar>();
+        bool Empty(int k) => all[k].IsWholeRest && (score.Rhythm is null || !score.Rhythm.InBar(k).Any());
+        for (int k = 0; k < all.Count; k++)
         {
-            var m = measures[k];
+            var m = all[k];
             int run = 1;
-            if (m.IsWholeRest && !m.Pickup)
-                while (k + run < measures.Count && measures[k + run].IsWholeRest && measures[k + run].Numerator == m.Numerator && measures[k + run].Denominator == m.Denominator && measures[k + run].KeySharps == m.KeySharps) run++;
-            if (run < 2) { placed.Add(PlaceMeasure(m)); continue; }
-            placed.Add(new PlacedMeasure { Measure = m, MultiRest = run, FixedWidth = 10, StretchWidth = 0 });
+            if (Empty(k) && !m.Pickup)
+                while (k + run < all.Count && Empty(k + run) && all[k + run].Numerator == m.Numerator && all[k + run].Denominator == m.Denominator && all[k + run].KeySharps == m.KeySharps) run++;
+            if (run < 2) { placed.Add(PlaceBar(m, k, voice, score.Rhythm)); continue; }
+            placed.Add(new PlacedBar { Measure = m, Index = k, MultiRest = run, FixedWidth = 10, StretchWidth = 0 });
             k += run - 1;
         }
-        var systems = new List<SystemPlan>();
+
+        var lines = new List<LinePlan>();
         int i = 0;
         while (i < placed.Count)
         {
-            var system = new SystemPlan { FirstMeasureNumber = placed[i].Measure.Number };
-            bool timeChanged = i == 0 || placed[i].Measure.Numerator != placed[i - 1].Measure.Numerator || placed[i].Measure.Denominator != placed[i - 1].Measure.Denominator;
-            system.ShowTimeSignature = timeChanged;
-            system.PrefixWidth = PrefixWidth(placed[i].Measure.KeySharps, timeChanged ? placed[i].Measure : null);
-            double available = width - system.PrefixWidth * ss, used = 0;
+            var line = new LinePlan();
+            var m0 = placed[i].Measure;
+            bool timeChanged = i == 0 || m0.Numerator != placed[i - 1].Measure.Numerator || m0.Denominator != placed[i - 1].Measure.Denominator;
+            line.ShowTimeSignature = timeChanged;
+            line.PrefixWidth = PrefixWidth(voice ? m0.KeySharps : 0, timeChanged ? m0 : null, voice);
+            double available = width - line.PrefixWidth * ss, used = 0;
             while (i < placed.Count)
             {
                 double w = placed[i].NaturalWidth * ss;
-                // A change of time signature part-way along a line is shown before the bar it starts.
-                if (system.Measures.Count > 0 && used + w > available) break;
-                system.Measures.Add(placed[i]);
+                if (line.Bars.Count > 0 && used + w > available) break;
+                line.Bars.Add(placed[i]);
                 used += w;
                 i++;
             }
-            double fixedTotal = system.Measures.Sum(m => m.FixedWidth) * ss, stretchTotal = system.Measures.Sum(m => m.StretchWidth) * ss;
-            system.Scale = stretchTotal <= 0 ? 1 : Math.Clamp((available - fixedTotal) / stretchTotal, 0.5, i >= placed.Count ? 1.35 : 3);
-            systems.Add(system);
+            double fixedTotal = line.Bars.Sum(b => b.FixedWidth) * ss, stretchTotal = line.Bars.Sum(b => b.StretchWidth) * ss;
+            line.Scale = stretchTotal <= 0 ? 1 : Math.Clamp((available - fixedTotal) / stretchTotal, 0.5, i >= placed.Count ? 1.35 : 3);
+            lines.Add(line);
         }
-        return systems;
+        return lines;
     }
 
     /// <summary>The width of clef, key signature and, where wanted, time signature at the start of a line, in staff spaces.</summary>
-    private static double PrefixWidth(int keySharps, Measure? timeFrom)
+    private static double PrefixWidth(int keySharps, Measure? timeFrom, bool clef)
     {
-        double w = 0.7 + Bravura.Get("gClef").Advance + 0.8;
+        double w = clef ? 0.7 + Bravura.Get("gClef").Advance + 0.8 : 1.0;
         if (keySharps != 0) w += Math.Abs(keySharps) * 1.15 + 0.6;
         if (timeFrom is not null) w += 0.3 + Math.Max(DigitsWidth(timeFrom.Numerator), DigitsWidth(timeFrom.Denominator)) + 1.0;
         return w;
@@ -173,204 +242,260 @@ public static class ScoreEngraver
 
     private static double DigitsWidth(int number) => number.ToString().Sum(d => Bravura.Get("timeSig" + d).Advance);
 
-    private static PlacedMeasure PlaceMeasure(Measure measure)
+    private static int NominalLength(Measure m) => m.Numerator * 16 / m.Denominator;
+
+    /// <summary>Places a bar: what each staff has in it, and one column for each moment something starts in any staff.</summary>
+    private static PlacedBar PlaceBar(Measure measure, int index, bool voice, RhythmLane? rhythm)
     {
-        var result = new PlacedMeasure { Measure = measure };
+        var bar = new PlacedBar { Measure = measure, Index = index };
         double head = Bravura.Get("noteheadBlack").Advance;
-        var state = new Dictionary<int, int>(); // the sharp or flat each place on the staff has in this bar
-        var keyAlter = Pitch.KeyAlter(measure.KeySharps);
-        int Current(Pitch p) => state.TryGetValue(p.Diatonic, out int a) ? a : keyAlter[p.Step];
+        int nominal = NominalLength(measure);
 
-        double fixedX = 1.0, stretchX = 0;
-        int index = 0;
-        foreach (var item in measure.Items)
+        if (voice)
         {
-            var placed = new PlacedItem { Item = item, Index = index++ };
-            if (item.IsRest)
+            var state = new Dictionary<int, int>(); // the sharp or flat each place on the staff has in this bar
+            var keyAlter = Pitch.KeyAlter(measure.KeySharps);
+            int Current(Pitch p) => state.TryGetValue(p.Diatonic, out int a) ? a : keyAlter[p.Step];
+            double accidentalStep = Bravura.Get("accidentalSharp").Advance + 0.2;
+            foreach (var item in measure.Items)
             {
-                double w = item.Length == measure.Numerator * 16 / measure.Denominator ? Bravura.Get("restWhole").Advance : RestWidth(item);
-                placed.Fixed = fixedX; placed.Stretch = stretchX;
-                fixedX += w + (item.Dotted ? 0.8 : 0);
-                stretchX += Spacing(item.Length);
-                result.Items.Add(placed);
-                continue;
-            }
-
-            var pitches = item.Pitches.OrderBy(p => p.Diatonic).ThenBy(p => p.Alter).ToList();
-            int low = pitches[0].Diatonic, high = pitches[^1].Diatonic;
-            placed.StemUp = item.Length < 16 && (MiddleLineDiatonic - low) > (high - MiddleLineDiatonic);
-
-            // Seconds in a chord: the head that touches the one before goes to the other side of the stem.
-            var shifts = new double[pitches.Count];
-            if (placed.StemUp) { for (int k = 1; k < pitches.Count; k++) if (pitches[k].Diatonic - pitches[k - 1].Diatonic == 1 && shifts[k - 1] == 0) shifts[k] = head - Stem; }
-            else { for (int k = pitches.Count - 2; k >= 0; k--) if (pitches[k + 1].Diatonic - pitches[k].Diatonic == 1 && shifts[k + 1] == 0) shifts[k] = -(head - Stem); }
-
-            // Accidentals this chord needs, stacked in columns to the left, highest first.
-            var needed = new List<(int Index, string Glyph)>();
-            for (int k = 0; k < pitches.Count; k++)
-            {
-                if (pitches[k].Alter == Current(pitches[k])) continue;
-                needed.Add((k, AccidentalGlyph(pitches[k].Alter)));
-                state[pitches[k].Diatonic] = pitches[k].Alter;
-            }
-            var columns = new List<int>(); // for each accidental, its column
-            var lastInColumn = new List<int>();
-            foreach (var (k, _) in needed.OrderByDescending(n => n.Index))
-            {
-                int c = 0;
-                while (c < lastInColumn.Count && Math.Abs(pitches[k].Diatonic - lastInColumn[c]) < 6) c++;
-                if (c == lastInColumn.Count) lastInColumn.Add(int.MinValue);
-                lastInColumn[c] = pitches[k].Diatonic;
-                columns.Add(c);
-            }
-            double accidentalWidth = needed.Count == 0 ? 0 : lastInColumn.Count * (Bravura.Get("accidentalSharp").Advance + 0.2) + 0.1;
-            double leftExtra = shifts.Any(s => s < 0) ? head - Stem : 0;
-
-            placed.Fixed = fixedX + accidentalWidth + leftExtra;
-            placed.Stretch = stretchX;
-            int ni = 0;
-            for (int k = 0; k < pitches.Count; k++)
-            {
-                string? glyph = null;
-                double offset = 0;
-                int at = needed.FindIndex(n => n.Index == k);
-                if (at >= 0)
+                var placed = new PlacedItem { Item = item };
+                if (item.IsRest)
                 {
-                    glyph = needed[at].Glyph;
-                    int column = columns[needed.OrderByDescending(n => n.Index).ToList().FindIndex(n => n.Index == k)];
-                    offset = -(column + 1) * (Bravura.Get("accidentalSharp").Advance + 0.2) - 0.1 + Math.Min(0, shifts[k]);
+                    // A whole-bar rest is centred in the bar later and takes no room of its own here.
+                    placed.Body = item.Length == nominal ? 0 : Bravura.Get(RestGlyph(item.Value)).Advance + (item.Dotted ? 0.8 : 0);
+                    bar.Items.Add(placed);
+                    continue;
                 }
-                placed.Notes.Add((pitches[k], shifts[k], glyph, offset));
-                ni++;
+                var pitches = item.Pitches.OrderBy(p => p.Diatonic).ThenBy(p => p.Alter).ToList();
+                int low = pitches[0].Diatonic, high = pitches[^1].Diatonic;
+                placed.StemUp = item.Length < 16 && (MiddleLineDiatonic - low) > (high - MiddleLineDiatonic);
+                // Seconds in a chord: the head that touches the one before goes to the other side of the stem.
+                var shifts = new double[pitches.Count];
+                if (placed.StemUp) { for (int k = 1; k < pitches.Count; k++) if (pitches[k].Diatonic - pitches[k - 1].Diatonic == 1 && shifts[k - 1] == 0) shifts[k] = head - Stem; }
+                else { for (int k = pitches.Count - 2; k >= 0; k--) if (pitches[k + 1].Diatonic - pitches[k].Diatonic == 1 && shifts[k + 1] == 0) shifts[k] = -(head - Stem); }
+                // Accidentals, stacked in columns to the left, highest first.
+                var column = new int[pitches.Count];
+                var glyphs = new string?[pitches.Count];
+                var lastInColumn = new List<int>();
+                for (int k = pitches.Count - 1; k >= 0; k--)
+                {
+                    if (pitches[k].Alter == Current(pitches[k])) continue;
+                    glyphs[k] = AccidentalGlyph(pitches[k].Alter);
+                    state[pitches[k].Diatonic] = pitches[k].Alter;
+                    int c = 0;
+                    while (c < lastInColumn.Count && Math.Abs(pitches[k].Diatonic - lastInColumn[c]) < 6) c++;
+                    if (c == lastInColumn.Count) lastInColumn.Add(int.MinValue);
+                    lastInColumn[c] = pitches[k].Diatonic;
+                    column[k] = c;
+                }
+                double leftExtra = shifts.Any(s => s < 0) ? head - Stem : 0;
+                for (int k = 0; k < pitches.Count; k++)
+                {
+                    double offset = glyphs[k] is null ? 0 : -(column[k] + 1) * accidentalStep - 0.1 + Math.Min(0, shifts[k]);
+                    placed.Notes.Add((pitches[k], shifts[k], glyphs[k], offset));
+                }
+                placed.Pre = (lastInColumn.Count == 0 ? 0 : lastInColumn.Count * accidentalStep + 0.1) + leftExtra;
+                placed.Body = head + (shifts.Any(s => s > 0) ? head - Stem : 0) + (item.Dotted ? 0.9 : 0.1);
+                bar.Items.Add(placed);
             }
-            fixedX = placed.Fixed + head + (shifts.Any(s => s > 0) ? head - Stem : 0) + (item.Dotted ? 0.9 : 0.1);
-            stretchX += Spacing(item.Length);
-            result.Items.Add(placed);
         }
-        result.FixedWidth = fixedX + 0.6;
-        result.StretchWidth = stretchX;
-        BeamNotes(result);
-        return result;
-    }
 
-    private static double RestWidth(NotatedItem item) => Bravura.Get(RestGlyph(item.Value)).Advance;
+        if (rhythm is not null)
+        {
+            int beat = measure.Beat;
+            foreach (var hit in rhythm.InBar(index))
+            {
+                // A strum of a length there is no single symbol for (cut short by a later one) is written as the
+                // lengths that make it up.
+                var parts = Quantizer.Split(hit.Position, Math.Min(hit.Length, measure.Length - hit.Position), measure.Length, beat);
+                for (int k = 0; k < parts.Count; k++)
+                    bar.Hits.Add(new PlacedHit { Position = parts[k].Start, Length = parts[k].Length, Rest = hit.Rest, Accent = hit.Accent && k == 0 });
+            }
+        }
+
+        // One column for each moment something starts, in either staff; its room is the widest thing there.
+        var positions = bar.Items.Where(p => !(p.Item.IsRest && p.Item.Length == nominal)).Select(p => p.Item.Start)
+            .Concat(bar.Hits.Select(h => h.Position)).Distinct().Order().ToList();
+        if (positions.Count == 0) positions.Add(0);
+        double fixedX = 1.0, stretchX = 0;
+        for (int c = 0; c < positions.Count; c++)
+        {
+            int pos = positions[c];
+            double pre = bar.Items.Where(p => p.Item.Start == pos).Select(p => p.Pre).DefaultIfEmpty(0).Max();
+            double body = bar.Items.Where(p => p.Item.Start == pos).Select(p => p.Body)
+                .Concat(bar.Hits.Where(h => h.Position == pos).Select(h => h.Rest ? Bravura.Get(RestGlyph(h.Value)).Advance : SlashWidth + (h.Dotted ? 0.7 : 0)))
+                .DefaultIfEmpty(0).Max();
+            double colFixed = fixedX + pre;
+            bar.Columns.Add((pos, colFixed, stretchX));
+            fixedX = colFixed + body;
+            int next = c + 1 < positions.Count ? positions[c + 1] : measure.Length;
+            stretchX += Spacing(next - pos);
+        }
+        foreach (var p in bar.Items)
+        {
+            var col = bar.Columns.FirstOrDefault(c => c.Position == p.Item.Start);
+            (p.Fixed, p.Stretch) = (col.Fixed, col.Stretch);
+        }
+        foreach (var h in bar.Hits)
+        {
+            var col = bar.Columns.First(c => c.Position == h.Position);
+            (h.Fixed, h.Stretch) = (col.Fixed, col.Stretch);
+        }
+        bar.FixedWidth = fixedX + 0.6;
+        bar.StretchWidth = stretchX;
+        BeamNotes(bar);
+        return bar;
+    }
 
     private static string RestGlyph(int value) => value switch { 16 => "restWhole", 8 => "restHalf", 4 => "restQuarter", 2 => "rest8th", _ => "rest16th" };
 
     private static string AccidentalGlyph(int alter) => alter switch { 2 => "accidentalDoubleSharp", 1 => "accidentalSharp", -1 => "accidentalFlat", -2 => "accidentalDoubleFlat", _ => "accidentalNatural" };
 
-    // ------------------------------------------------------------------ beams
-
-    /// <summary>Gathers the eighth and sixteenth notes of a beat into beams, and settles which way each group's stems go.</summary>
-    private static void BeamNotes(PlacedMeasure m)
+    /// <summary>Gathers the eighth and sixteenth notes of a beat into beams, in each staff, and settles the voice's stem directions.</summary>
+    private static void BeamNotes(PlacedBar bar)
     {
-        BeamGroup? current = null;
-        int beat = m.Measure.Beat;
-        foreach (var p in m.Items)
+        int beat = bar.Measure.Beat;
+        List<PlacedItem>? current = null;
+        foreach (var p in bar.Items)
         {
-            bool beamable = !p.Item.IsRest && p.Item.Flags > 0;
-            if (!beamable) { current = null; continue; }
-            if (current is null || p.Item.Start / beat != current.Items[^1].Item.Start / beat)
-            {
-                current = new BeamGroup();
-                m.Beams.Add(current);
-            }
-            current.Items.Add(p);
+            if (p.Item.IsRest || p.Item.Flags == 0) { current = null; continue; }
+            if (current is null || p.Item.Start / beat != current[^1].Item.Start / beat) bar.Beams.Add(current = []);
+            current.Add(p);
         }
-        m.Beams.RemoveAll(g => g.Items.Count < 2);
-        foreach (var g in m.Beams)
+        bar.Beams.RemoveAll(g => g.Count < 2);
+        foreach (var g in bar.Beams)
         {
-            // The stems of a beamed group go the way the notes farthest from the middle line ask.
-            int far = g.Items.SelectMany(i => i.Notes).Select(n => n.Pitch.Diatonic - MiddleLineDiatonic).MaxBy(Math.Abs);
-            g.StemUp = far < 0;
-            foreach (var i in g.Items) { i.StemUp = g.StemUp; i.Beamed = true; }
+            int far = g.SelectMany(i => i.Notes).Select(n => n.Pitch.Diatonic - MiddleLineDiatonic).MaxBy(Math.Abs);
+            bool up = far < 0;
+            bar.BeamUp.Add(up);
+            foreach (var i in g) { i.StemUp = up; i.Beamed = true; }
         }
+
+        List<PlacedHit>? run = null;
+        foreach (var h in bar.Hits)
+        {
+            if (h.Rest || h.Flags == 0) { run = null; continue; }
+            if (run is null || h.Position / beat != run[^1].Position / beat || run[^1].Position + run[^1].Length != h.Position) bar.HitBeams.Add(run = []);
+            run.Add(h);
+        }
+        bar.HitBeams.RemoveAll(g => g.Count < 2);
+        foreach (var g in bar.HitBeams) foreach (var h in g) h.Beamed = true;
     }
 
     // ------------------------------------------------------------------ drawing
 
-    private static void DrawHeading(PageCanvas canvas, ScoreOptions o)
+    private static void DrawHeading(PageCanvas canvas, ScoreDocument s, ScoreOptions o)
     {
-        double width = o.PageWidth;
-        if (o.Title.Length > 0)
+        if (s.Title.Length > 0)
         {
             var style = new TextStyle { Font = StandardFont.Times, Bold = true, Size = 22 };
-            canvas.Text((width - canvas.MeasureText(o.Title, style)) / 2, o.Margin + 20, o.Title, style);
+            canvas.Text((o.PageWidth - canvas.MeasureText(s.Title, style)) / 2, o.Margin + 20, s.Title, style);
         }
-        if (o.Subtitle.Length > 0)
+        if (s.Subtitle.Length > 0)
         {
             var style = new TextStyle { Font = StandardFont.Times, Size = 11 };
-            canvas.Text(width - o.Margin - canvas.MeasureText(o.Subtitle, style), o.Margin + 38, o.Subtitle, style);
+            canvas.Text(o.PageWidth - o.Margin - canvas.MeasureText(s.Subtitle, style), o.Margin + 38, s.Subtitle, style);
         }
     }
 
-    private static void DrawSystem(PageCanvas canvas, SystemPlan system, IReadOnlyList<Measure> all, ScoreOptions o, double left, double right)
+    private static void DrawLine(PageCanvas canvas, int page, LinePlan line, ScoreDocument score, bool voice, bool rhythm, ScoreOptions o, double left,
+                                 List<BarMap> barMaps, List<LaneBand> bands, List<ItemMap> itemMaps)
     {
-        double ss = o.StaffSpace, top = system.StaffTop;
+        double ss = o.StaffSpace, top = line.StaffTop;
         double Y(int steps) => StepY(top, ss, steps);
+        var first = line.Bars[0].Measure;
+        double lineEnd = left + line.PrefixWidth * ss + line.Bars.Sum(b => (b.FixedWidth + b.StretchWidth * line.Scale) * ss);
+        int firstBar = line.Bars[0].Index, lastBar = line.Bars[^1].LastIndex;
 
-        // The staff.
-        double lineEnd = left + system.PrefixWidth * ss + system.Measures.Sum(m => m.FixedWidth * ss + m.StretchWidth * ss * system.Scale);
-        for (int l = 0; l < 5; l++) canvas.Line(new PdfPoint(left, top + l * ss), new PdfPoint(lineEnd, top + l * ss), StaffLine * ss);
-        canvas.Line(new PdfPoint(left + StaffLine * ss / 2, top), new PdfPoint(left + StaffLine * ss / 2, top + 4 * ss), BarLine * ss);
-
-        // Clef, key signature, time signature.
-        double x = left + 0.7 * ss;
-        Place(canvas, "gClef", x, Y(2), ss);
-        x += (Bravura.Get("gClef").Advance + 0.8) * ss;
-        var first = system.Measures[0].Measure;
-        if (first.KeySharps != 0)
+        if (voice)
         {
-            int[] sharpSteps = [8, 5, 9, 6, 3, 7, 4];     // F C G D A E B, in steps above the bottom line
-            int[] flatSteps = [4, 7, 3, 6, 2, 5, 1];      // B E A D G C F
-            for (int k = 0; k < Math.Abs(first.KeySharps); k++)
+            for (int l = 0; l < 5; l++) canvas.Line(new PdfPoint(left, top + l * ss), new PdfPoint(lineEnd, top + l * ss), StaffLine * ss);
+            canvas.Line(new PdfPoint(left + StaffLine * ss / 2, top), new PdfPoint(left + StaffLine * ss / 2, top + 4 * ss), BarLine * ss);
+            double x = left + 0.7 * ss;
+            Place(canvas, "gClef", x, Y(2), ss);
+            x += (Bravura.Get("gClef").Advance + 0.8) * ss;
+            if (first.KeySharps != 0)
             {
-                Place(canvas, first.KeySharps > 0 ? "accidentalSharp" : "accidentalFlat", x, Y((first.KeySharps > 0 ? sharpSteps : flatSteps)[k]), ss);
-                x += 1.15 * ss;
+                int[] sharpSteps = [8, 5, 9, 6, 3, 7, 4];     // F C G D A E B, in steps above the bottom line
+                int[] flatSteps = [4, 7, 3, 6, 2, 5, 1];      // B E A D G C F
+                for (int k = 0; k < Math.Abs(first.KeySharps); k++)
+                {
+                    Place(canvas, first.KeySharps > 0 ? "accidentalSharp" : "accidentalFlat", x, Y((first.KeySharps > 0 ? sharpSteps : flatSteps)[k]), ss);
+                    x += 1.15 * ss;
+                }
+                x += 0.6 * ss;
             }
-            x += 0.6 * ss;
+            if (line.ShowTimeSignature)
+            {
+                x += 0.3 * ss;
+                double w = Math.Max(DigitsWidth(first.Numerator), DigitsWidth(first.Denominator));
+                DrawDigits(canvas, first.Numerator, x, Y(6), ss, w);
+                DrawDigits(canvas, first.Denominator, x, Y(2), ss, w);
+            }
+            bands.Add(new LaneBand(page, firstBar, lastBar, LaneKind.Voice, top - 3 * ss, top + 7 * ss));
         }
-        if (system.ShowTimeSignature)
+        if (rhythm)
         {
-            x += 0.3 * ss;
-            double width = Math.Max(DigitsWidth(first.Numerator), DigitsWidth(first.Denominator));
-            DrawDigits(canvas, first.Numerator, x, Y(6), ss, width);
-            DrawDigits(canvas, first.Denominator, x, Y(2), ss, width);
+            bands.Add(new LaneBand(page, firstBar, lastBar, LaneKind.Rhythm, line.RhythmBase - 4.5 * ss, line.RhythmBase + 2.2 * ss));
+            if (firstBar == 0 && score.Rhythm!.Label.Length > 0)
+                canvas.Text(left, line.RhythmBase - 4.6 * ss, score.Rhythm.Label, new TextStyle { Size = (float)(1.8 * ss), Bold = true });
         }
 
-        if (o.Tempo > 0 && ReferenceEquals(system.Measures[0].Measure, all[0]))
+        // The tempo mark stands above everything else on the first line, above the rhythm staff's name when there is one.
+        double markTop = rhythm ? line.RhythmBase - (score.Rhythm!.Label.Length > 0 ? 8.2 : 6.2) * ss : top - 3.2 * ss;
+        if (score.Tempo > 0 && firstBar == 0)
         {
-            double tx = left + system.PrefixWidth * ss;
-            Place(canvas, "noteQuarterUp", tx, top - 3.2 * ss, ss * 0.85);
-            canvas.Text(tx + 1.6 * ss, top - 3.2 * ss + 0.15 * ss, $"= {Math.Round(o.Tempo)}", new TextStyle { Size = (float)(2.0 * ss), Bold = true });
+            double tx = left + line.PrefixWidth * ss;
+            Place(canvas, "noteQuarterUp", tx, markTop, ss * 0.85);
+            canvas.Text(tx + 1.6 * ss, markTop + 0.15 * ss, $"= {Math.Round(score.Tempo)}", new TextStyle { Size = (float)(2.0 * ss), Bold = true });
         }
-
-        // Bar number above the first bar of the line (not the very first).
-        if (system.FirstMeasureNumber > 1 && system.Measures[0].Measure.Number > 1)
-            canvas.Text(left, top - 1.2 * ss, system.FirstMeasureNumber.ToString(), new TextStyle { Size = (float)(1.6 * ss), Italic = true });
+        if (first.Number > 1)
+            canvas.Text(left, (voice ? top : line.RhythmBase - 3 * ss) - 1.2 * ss, first.Number.ToString(), new TextStyle { Size = (float)(1.6 * ss), Italic = true });
 
         // The bars.
-        double barX = left + system.PrefixWidth * ss;
-        var drawn = new List<(PlacedMeasure Bar, double X)>();
-        foreach (var m in system.Measures)
+        double barX = left + line.PrefixWidth * ss;
+        var drawn = new List<(PlacedBar Bar, double X)>();
+        foreach (var b in line.Bars)
         {
-            drawn.Add((m, barX));
-            double Xof(PlacedItem p) => barX + (p.Fixed + p.Stretch * system.Scale) * ss;
-            double width = (m.FixedWidth + m.StretchWidth * system.Scale) * ss;
-            if (m.MultiRest > 1) DrawMultiRest(canvas, m.MultiRest, barX, width, top, ss);
-            foreach (var p in m.Items) DrawItem(canvas, p, m, Xof(p), top, ss, barX, width);
-            foreach (var group in m.Beams) DrawBeam(canvas, group, m, Xof, top, ss);
-            barX += width;
-            bool last = m.LastNumber == all[^1].Number;
-            if (last)
+            drawn.Add((b, barX));
+            double Xof(double fix, double stretch) => barX + (fix + stretch * line.Scale) * ss;
+            double width = (b.FixedWidth + b.StretchWidth * line.Scale) * ss;
+            barMaps.Add(new BarMap(page, b.Index, b.Measure.Length, barX, width, b.Columns.Select(c => (c.Position, Xof(c.Fixed, c.Stretch))).ToList()));
+            for (int extra = 1; extra < b.MultiRest; extra++) barMaps.Add(new BarMap(page, b.Index + extra, b.Measure.Length, barX, width, []));
+
+            if (voice)
             {
-                canvas.Line(new PdfPoint(barX - 0.9 * ss, top), new PdfPoint(barX - 0.9 * ss, top + 4 * ss), BarLine * ss);
-                canvas.Line(new PdfPoint(barX - 0.25 * ss, top), new PdfPoint(barX - 0.25 * ss, top + 4 * ss), 0.5 * ss);
+                if (b.MultiRest > 1) DrawMultiRest(canvas, b.MultiRest, barX, width, top, ss);
+                foreach (var p in b.Items)
+                {
+                    var bounds = DrawItem(canvas, p, b, Xof(p.Fixed, p.Stretch), top, ss, barX, width);
+                    itemMaps.Add(new ItemMap(page, LaneKind.Voice, b.Index, p.Item.Start, p.Item.Length, bounds));
+                }
+                for (int g = 0; g < b.Beams.Count; g++) DrawBeam(canvas, b.Beams[g], b.BeamUp[g], p => Xof(p.Fixed, p.Stretch), top, ss);
+                bool last = b.LastIndex == score.Bars.Count - 1;
+                double end = barX + width;
+                if (last)
+                {
+                    canvas.Line(new PdfPoint(end - 0.9 * ss, top), new PdfPoint(end - 0.9 * ss, top + 4 * ss), BarLine * ss);
+                    canvas.Line(new PdfPoint(end - 0.25 * ss, top), new PdfPoint(end - 0.25 * ss, top + 4 * ss), 0.5 * ss);
+                }
+                else canvas.Line(new PdfPoint(end, top), new PdfPoint(end, top + 4 * ss), BarLine * ss);
             }
-            else canvas.Line(new PdfPoint(barX, top), new PdfPoint(barX, top + 4 * ss), BarLine * ss);
+            if (rhythm)
+            {
+                foreach (var h in b.Hits)
+                {
+                    var bounds = DrawHit(canvas, h, Xof(h.Fixed, h.Stretch), line.RhythmBase, ss);
+                    itemMaps.Add(new ItemMap(page, LaneKind.Rhythm, b.Index, h.Position, h.Length, bounds));
+                }
+                foreach (var g in b.HitBeams) DrawHitBeam(canvas, g, h => Xof(h.Fixed, h.Stretch), line.RhythmBase, ss);
+            }
+            barX += width;
         }
 
-        // Ties, now that the places are known (a tie may run into the next bar or off the end of the line).
+        // Ties of the voice staff, now that the places are known (one may run into the next bar or off the line).
+        if (!voice) return;
         for (int b = 0; b < drawn.Count; b++)
         {
             var (bar, bx) = drawn[b];
@@ -378,9 +503,9 @@ public static class ScoreEngraver
             {
                 var p = bar.Items[k];
                 if (!p.Item.TiedToNext || p.Item.IsRest) continue;
-                double x1 = bx + (p.Fixed + p.Stretch * system.Scale) * ss;
+                double x1 = bx + (p.Fixed + p.Stretch * line.Scale) * ss;
                 PlacedItem? next = k + 1 < bar.Items.Count ? bar.Items[k + 1] : b + 1 < drawn.Count ? drawn[b + 1].Bar.Items.FirstOrDefault() : null;
-                double x2 = next is null ? barX : (k + 1 < bar.Items.Count ? bx : drawn[b + 1].X) + (next.Fixed + next.Stretch * system.Scale) * ss;
+                double x2 = next is null ? barX : (k + 1 < bar.Items.Count ? bx : drawn[b + 1].X) + (next.Fixed + next.Stretch * line.Scale) * ss;
                 DrawTies(canvas, p, x1, x2, top, ss, next is null);
             }
         }
@@ -412,27 +537,25 @@ public static class ScoreEngraver
     private static void Place(PageCanvas canvas, string glyph, double x, double y, double ss) =>
         canvas.PlacedPath(Bravura.Get(glyph).Steps, Ink, ss, x, y);
 
-    private static void DrawItem(PageCanvas canvas, PlacedItem p, PlacedMeasure m, double x, double top, double ss, double barX, double barWidth)
+    /// <summary>Draws a note, chord or rest of the voice staff; returns the box it takes, for clicking.</summary>
+    private static PdfRect DrawItem(PageCanvas canvas, PlacedItem p, PlacedBar b, double x, double top, double ss, double barX, double barWidth)
     {
         var item = p.Item;
-        double head = Bravura.Get("noteheadBlack").Advance;
         if (item.IsRest)
         {
-            // A rest for a whole bar is the whole rest, in any time signature; an upbeat, shorter than a bar, is written as the rest it is.
-            bool whole = item.Length == m.Measure.Numerator * 16 / m.Measure.Denominator;
+            bool whole = item.Length == NominalLength(b.Measure);
             string name = whole ? "restWhole" : RestGlyph(item.Value);
             int restSteps = name == "restWhole" ? 6 : 4;   // a whole rest hangs from the fourth line; the others are centred on the middle line
-            double rx = whole ? barX + (barWidth - Bravura.Get(name).Advance * ss) / 2 : x;   // a rest for the whole bar is centred in it
+            double rx = whole ? barX + (barWidth - Bravura.Get(name).Advance * ss) / 2 : x;
             Place(canvas, name, rx, StepY(top, ss, restSteps), ss);
             if (item.Dotted) Place(canvas, "augmentationDot", rx + Bravura.Get(name).Advance * ss + 0.3 * ss, StepY(top, ss, 5), ss);
-            return;
+            return new PdfRect(rx - 0.3 * ss, top, Bravura.Get(name).Advance * ss + 0.6 * ss, 4 * ss);
         }
 
         string headGlyph = item.Value >= 16 ? "noteheadWhole" : item.Value >= 8 ? "noteheadHalf" : "noteheadBlack";
         double headWidth = Bravura.Get(headGlyph).Advance;
-        double stemX = p.StemUp ? x + (headWidth - Stem) * ss : x + 0 * ss;       // the stem's left edge
-        var steps = p.Notes.Select(n => n.Pitch.Diatonic - BottomLineDiatonic).ToList();
-        int lowSteps = steps.Min(), highSteps = steps.Max();
+        double stemX = p.StemUp ? x + (headWidth - Stem) * ss : x;       // the stem's left edge
+        int lowSteps = p.Notes.Min(n => n.Pitch.Diatonic) - BottomLineDiatonic, highSteps = p.Notes.Max(n => n.Pitch.Diatonic) - BottomLineDiatonic;
 
         foreach (var (pitch, shift, accidental, offset) in p.Notes)
         {
@@ -449,96 +572,127 @@ public static class ScoreEngraver
                 Place(canvas, "augmentationDot", x + (headWidth + 0.35) * ss + Math.Max(0, shift) * ss, dotY, ss);
             }
         }
-
-        if (item.Length >= 16) return;
-        // The stem runs from the head at one end of the chord to its end, a stem length beyond the other.
         double yTop = StepY(top, ss, highSteps), yBottom = StepY(top, ss, lowSteps);
-        double yStemEnd;
-        if (p.Beamed) yStemEnd = double.NaN;  // a beamed stem is drawn with its beam
-        else
-        {
-            yStemEnd = p.StemUp ? yTop - StemLength * ss : yBottom + StemLength * ss;
-            // A stem for a note far outside the staff reaches the middle line, at least.
-            double middle = StepY(top, ss, 4);
-            if (p.StemUp && yStemEnd > middle) yStemEnd = middle;
-            if (!p.StemUp && yStemEnd < middle) yStemEnd = middle;
-            canvas.Line(new PdfPoint(stemX + Stem * ss / 2, p.StemUp ? yBottom : yTop), new PdfPoint(stemX + Stem * ss / 2, yStemEnd), Stem * ss);
-            if (item.Flags > 0) Place(canvas, $"flag{(item.Flags == 1 ? "8th" : "16th")}{(p.StemUp ? "Up" : "Down")}", stemX, yStemEnd, ss);
-        }
+        var bounds = new PdfRect(x - 0.3 * ss, yTop - 0.8 * ss, (headWidth + 0.6) * ss, yBottom - yTop + 1.6 * ss);
+
+        if (item.Length >= 16 || p.Beamed) return bounds;   // a whole note has no stem; a beamed stem is drawn with its beam
+        double yStemEnd = p.StemUp ? yTop - StemLength * ss : yBottom + StemLength * ss;
+        double middle = StepY(top, ss, 4);   // a stem for a note far outside the staff reaches the middle line, at least
+        if (p.StemUp && yStemEnd > middle) yStemEnd = middle;
+        if (!p.StemUp && yStemEnd < middle) yStemEnd = middle;
+        canvas.Line(new PdfPoint(stemX + Stem * ss / 2, p.StemUp ? yBottom : yTop), new PdfPoint(stemX + Stem * ss / 2, yStemEnd), Stem * ss);
+        if (item.Flags > 0) Place(canvas, $"flag{(item.Flags == 1 ? "8th" : "16th")}{(p.StemUp ? "Up" : "Down")}", stemX, yStemEnd, ss);
+        return bounds;
     }
 
     private static void Ledger(PageCanvas canvas, double x, double y, double headWidth, double ss) =>
         canvas.Line(new PdfPoint(x - LedgerExtension * ss, y), new PdfPoint(x + (headWidth + LedgerExtension) * ss, y), LedgerLine * ss);
 
-    private static void DrawBeam(PageCanvas canvas, BeamGroup g, PlacedMeasure m, Func<PlacedItem, double> xOf, double top, double ss)
+    private static void DrawBeam(PageCanvas canvas, List<PlacedItem> g, bool up, Func<PlacedItem, double> xOf, double top, double ss)
     {
         double head = Bravura.Get("noteheadBlack").Advance;
-        double StemX(PlacedItem p) => g.StemUp ? xOf(p) + (head - Stem) * ss : xOf(p);
-        double NoteEnd(PlacedItem p) => g.StemUp ? StepY(top, ss, p.Notes.Max(n => n.Pitch.Diatonic - BottomLineDiatonic)) : StepY(top, ss, p.Notes.Min(n => n.Pitch.Diatonic - BottomLineDiatonic));
-        double NoteStart(PlacedItem p) => g.StemUp ? StepY(top, ss, p.Notes.Min(n => n.Pitch.Diatonic - BottomLineDiatonic)) : StepY(top, ss, p.Notes.Max(n => n.Pitch.Diatonic - BottomLineDiatonic));
+        double StemX(PlacedItem p) => up ? xOf(p) + (head - Stem) * ss : xOf(p);
+        double NoteEnd(PlacedItem p) => up ? StepY(top, ss, p.Notes.Max(n => n.Pitch.Diatonic) - BottomLineDiatonic) : StepY(top, ss, p.Notes.Min(n => n.Pitch.Diatonic) - BottomLineDiatonic);
+        double NoteStart(PlacedItem p) => up ? StepY(top, ss, p.Notes.Min(n => n.Pitch.Diatonic) - BottomLineDiatonic) : StepY(top, ss, p.Notes.Max(n => n.Pitch.Diatonic) - BottomLineDiatonic);
 
         // The beam runs from the first stem's end to the last's, slanting at most a staff space, then is moved out until
         // every stem is at least two and a half staff spaces long.
-        var first = g.Items[0]; var last = g.Items[^1];
-        double x1 = StemX(first), x2 = StemX(last);
-        double y1 = NoteEnd(first) + (g.StemUp ? -StemLength : StemLength) * ss;
-        double y2 = NoteEnd(last) + (g.StemUp ? -StemLength : StemLength) * ss;
-        double slant = Math.Clamp(y2 - y1, -ss, ss);
-        double mid = (y1 + y2) / 2;
+        double x1 = StemX(g[0]), x2 = StemX(g[^1]);
+        double y1 = NoteEnd(g[0]) + (up ? -StemLength : StemLength) * ss, y2 = NoteEnd(g[^1]) + (up ? -StemLength : StemLength) * ss;
+        double slant = Math.Clamp(y2 - y1, -ss, ss), mid = (y1 + y2) / 2;
         y1 = mid - slant / 2; y2 = mid + slant / 2;
         double Line(double x) => x2 == x1 ? y1 : y1 + (y2 - y1) * (x - x1) / (x2 - x1);
         double move = 0;
-        foreach (var p in g.Items)
+        foreach (var p in g)
         {
-            double beamAt = Line(StemX(p)), reach = Math.Abs(beamAt - NoteEnd(p)), need = 2.5 * ss;
+            double reach = Math.Abs(Line(StemX(p)) - NoteEnd(p)), need = 2.5 * ss;
             if (reach < need) move = Math.Max(move, need - reach);
         }
-        y1 += g.StemUp ? -move : move; y2 += g.StemUp ? -move : move;
-
-        // Stems.
-        foreach (var p in g.Items)
+        y1 += up ? -move : move; y2 += up ? -move : move;
+        foreach (var p in g)
             canvas.Line(new PdfPoint(StemX(p) + Stem * ss / 2, NoteStart(p)), new PdfPoint(StemX(p) + Stem * ss / 2, Line(StemX(p))), Stem * ss);
+        BeamBars(canvas, g.Select(p => (StemX(p), p.Item.Flags)).ToList(), Line, up, ss);
+    }
 
-        // Beams: a primary beam across the group, a second where the notes are sixteenths.
+    /// <summary>The primary beam across a group, and a second over runs of sixteenths (a lone sixteenth gets a short stub).</summary>
+    private static void BeamBars(PageCanvas canvas, List<(double StemX, int Flags)> stems, Func<double, double> line, bool up, double ss)
+    {
         void Bar(double xa, double xb, int level)
         {
-            double offset = level * (BeamThickness + BeamGap) * ss * (g.StemUp ? 1 : -1);
-            double a = Line(xa) + offset, b = Line(xb) + offset, t = BeamThickness * ss;
-            // The beam hangs from its edge on the stem side: for up stems, its top edge is at the stem end.
-            double sign = g.StemUp ? 1 : -1;
+            double offset = level * (BeamThickness + BeamGap) * ss * (up ? 1 : -1);
+            double a = line(xa) + offset, b = line(xb) + offset, t = BeamThickness * ss * (up ? 1 : -1);
             canvas.Path([
                 new('M', new PdfPoint(xa, a)), new('L', new PdfPoint(xb + Stem * ss, b)),
-                new('L', new PdfPoint(xb + Stem * ss, b + sign * t)), new('L', new PdfPoint(xa, a + sign * t)), new('Z', default)],
-                new PathStyle { Fill = PdfColor.Black });
+                new('L', new PdfPoint(xb + Stem * ss, b + t)), new('L', new PdfPoint(xa, a + t)), new('Z', default)], Ink);
         }
-        Bar(x1, x2, 0);
-        // Second beams over runs of sixteenths; a lone sixteenth gets a short stub.
-        for (int i = 0; i < g.Items.Count;)
+        Bar(stems[0].StemX, stems[^1].StemX, 0);
+        for (int i = 0; i < stems.Count;)
         {
-            if (g.Items[i].Item.Flags < 2) { i++; continue; }
+            if (stems[i].Flags < 2) { i++; continue; }
             int j = i;
-            while (j + 1 < g.Items.Count && g.Items[j + 1].Item.Flags >= 2) j++;
-            double xa = StemX(g.Items[i]), xb = StemX(g.Items[j]);
+            while (j + 1 < stems.Count && stems[j + 1].Flags >= 2) j++;
+            double xa = stems[i].StemX, xb = stems[j].StemX;
             if (i == j)
             {
                 double stub = 1.1 * ss;
-                if (i == g.Items.Count - 1) { xb = xa; xa -= stub; } else xb = xa + stub;
+                if (i == stems.Count - 1) { xb = xa; xa -= stub; } else xb = xa + stub;
             }
             Bar(xa, xb, 1);
             i = j + 1;
         }
     }
 
+    /// <summary>
+    /// Draws a strum of the rhythm staff: a slash with a stem up (hollow for a half or whole, no stem for a whole),
+    /// its flag when not beamed, a dot, an accent below; or a rest. Returns the box it takes, for clicking.
+    /// </summary>
+    private static PdfRect DrawHit(PageCanvas canvas, PlacedHit h, double x, double baseY, double ss)
+    {
+        if (h.Rest)
+        {
+            string name = RestGlyph(h.Value);
+            Place(canvas, name, x, name == "restWhole" ? baseY - 0.5 * ss : baseY, ss);
+            if (h.Dotted) Place(canvas, "augmentationDot", x + (Bravura.Get(name).Advance + 0.3) * ss, baseY - 0.5 * ss, ss);
+            return new PdfRect(x - 0.3 * ss, baseY - 2 * ss, (Bravura.Get(name).Advance + 0.6) * ss, 4 * ss);
+        }
+        double w = SlashWidth * ss, t = 0.42 * ss, half = 0.62 * ss;
+        var outline = new List<ShapeStep>
+        {
+            new('M', new PdfPoint(x, baseY + half)), new('L', new PdfPoint(x + t, baseY + half)),
+            new('L', new PdfPoint(x + w, baseY - half)), new('L', new PdfPoint(x + w - t, baseY - half)), new('Z', default),
+        };
+        bool hollow = h.Value >= 8;
+        canvas.Path(outline, hollow ? new PathStyle { Stroke = PdfColor.Black, StrokeWidth = 0.16 * ss } : Ink);
+        double stemX = x + w - Stem * ss / 2;
+        if (h.Value < 16 && !h.Beamed)
+        {
+            double end = baseY - StemLength * ss;
+            canvas.Line(new PdfPoint(stemX, baseY - half), new PdfPoint(stemX, end), Stem * ss);
+            if (h.Flags > 0) Place(canvas, h.Flags == 1 ? "flag8thUp" : "flag16thUp", stemX - Stem * ss / 2, end, ss);
+        }
+        if (h.Dotted) Place(canvas, "augmentationDot", x + w + 0.35 * ss, baseY - 0.4 * ss, ss);
+        if (h.Accent) Place(canvas, "articAccentBelow", x + (w - Bravura.Get("articAccentBelow").Advance * ss) / 2, baseY + half + 1.5 * ss, ss);
+        return new PdfRect(x - 0.3 * ss, baseY - StemLength * ss - 0.3 * ss, w + 0.6 * ss, (StemLength + 1.0) * ss + half);
+    }
+
+    /// <summary>The stems and beams of beamed strums: the stems end level, at a stem length above the slashes.</summary>
+    private static void DrawHitBeam(PageCanvas canvas, List<PlacedHit> g, Func<PlacedHit, double> xOf, double baseY, double ss)
+    {
+        double half = 0.62 * ss, end = baseY - StemLength * ss;
+        double StemX(PlacedHit h) => xOf(h) + SlashWidth * ss - Stem * ss;
+        foreach (var h in g) canvas.Line(new PdfPoint(StemX(h) + Stem * ss / 2, baseY - half), new PdfPoint(StemX(h) + Stem * ss / 2, end), Stem * ss);
+        BeamBars(canvas, g.Select(h => (StemX(h), h.Flags)).ToList(), _ => end, true, ss);
+    }
+
     private static void DrawTies(PageCanvas canvas, PlacedItem p, double x1, double x2, double top, double ss, bool offLine)
     {
         double head = Bravura.Get("noteheadBlack").Advance;
-        // A tie goes on the side away from the stem.
-        bool above = !p.StemUp;
+        bool above = !p.StemUp;   // a tie goes on the side away from the stem
         foreach (var n in p.Notes)
         {
             int s = n.Pitch.Diatonic - BottomLineDiatonic;
             double y = StepY(top, ss, s) + (above ? -0.45 * ss : 0.45 * ss);
-            double a = x1 + (head + 0.15 + Math.Max(0, n.Shift / ss)) * ss, b = offLine ? x2 - 0.4 * ss : x2 - 0.2 * ss;
+            double a = x1 + (head + 0.15 + Math.Max(0, n.Shift)) * ss, b = offLine ? x2 - 0.4 * ss : x2 - 0.2 * ss;
             if (b - a < 1.2 * ss) b = a + 1.2 * ss;
             double h = Math.Clamp((b - a) * 0.12, 0.6 * ss, 1.2 * ss) * (above ? -1 : 1), t = 0.22 * ss * (above ? 1 : -1);
             double w = b - a;
@@ -546,7 +700,7 @@ public static class ScoreEngraver
                 new('M', new PdfPoint(a, y)),
                 new('C', new PdfPoint(b, y), new PdfPoint(a + w * 0.2, y + h * 1.33), new PdfPoint(b - w * 0.2, y + h * 1.33)),
                 new('C', new PdfPoint(a, y), new PdfPoint(b - w * 0.2, y + h * 1.33 + t), new PdfPoint(a + w * 0.2, y + h * 1.33 + t)),
-                new('Z', default)], new PathStyle { Fill = PdfColor.Black });
+                new('Z', default)], Ink);
         }
     }
 }

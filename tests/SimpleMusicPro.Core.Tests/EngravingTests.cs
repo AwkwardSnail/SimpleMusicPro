@@ -35,7 +35,8 @@ public class EngravingTests
         using var doc = ScoreEngraver.Engrave(Bars(notes), new ScoreOptions { Title = "Scales" });
         Assert.InRange(doc.PageCount, 3, 12);
         using var saved = PdfDocument.Open(doc.ToBytes());
-        for (int p = 0; p < doc.PageCount; p++) Assert.True(saved.GetShapes(p).Count > 200, $"page {p + 1} has music on it");
+        // Every page but the last is full of music; the last holds what is left, at least one line.
+        for (int p = 0; p < doc.PageCount; p++) Assert.True(saved.GetShapes(p).Count > (p < doc.PageCount - 1 ? 200 : 20), $"page {p + 1} has music on it");
     }
 
     [Fact]
