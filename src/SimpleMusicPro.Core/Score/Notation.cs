@@ -74,7 +74,8 @@ public sealed record NotatedItem(int Start, int Length, IReadOnlyList<Pitch> Pit
 /// <param name="Number">The bar number, from 1.</param>
 /// <param name="Start">Where the bar starts, in sixteenth notes from the start of the piece.</param>
 /// <param name="Length">How long it is, in sixteenth notes (16 in 4/4).</param>
-public sealed record Measure(int Number, long Start, int Length, int Numerator, int Denominator, int KeySharps, IReadOnlyList<NotatedItem> Items)
+/// <param name="Pickup">A short bar before the first full one (an upbeat), numbered 0.</param>
+public sealed record Measure(int Number, long Start, int Length, int Numerator, int Denominator, int KeySharps, IReadOnlyList<NotatedItem> Items, bool Pickup = false)
 {
     /// <summary>A beat, in sixteenths: a quarter, or three eighths in a compound time such as 6/8.</summary>
     public int Beat => Denominator == 8 && Numerator % 3 == 0 && Numerator > 3 ? 6 : 16 / Denominator;

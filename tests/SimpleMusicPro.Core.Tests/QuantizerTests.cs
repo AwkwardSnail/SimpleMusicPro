@@ -3,15 +3,14 @@ using SimpleMusicPro.Score;
 
 namespace SimpleMusicPro.Core.Tests;
 
-public class QuantizerTests
+internal static class QuantizerHelper
 {
-    // Notes are given in sixteenth notes (4 ticks a sixteenth at 16 ticks to a quarter would be too fine: use 96 per quarter, 24 a sixteenth).
+    // 96 ticks to a quarter: 24 to a sixteenth.
     private const int T = 24;
 
-    private static (MidiFile File, MidiTrack Track) Make(params (int Start, int Length, int Pitch)[] notes)
+    /// <summary>A MIDI file with one track holding these notes, given in sixteenths: start, length and key.</summary>
+    internal static (MidiFile File, MidiTrack Track) Make(params (int Start, int Length, int Pitch)[] notes)
     {
-        // A file with the sample's header, with these notes as its only track: the sample bytes are reused for the file
-        // layout, the notes replaced by reading a file we build here.
         var track = new List<byte>();
         long last = 0;
         var events = notes.SelectMany(n => new[] { (Time: (long)n.Start * T, On: true, n.Pitch), (Time: (long)(n.Start + n.Length) * T, On: false, n.Pitch) })
@@ -38,6 +37,11 @@ public class QuantizerTests
         while ((v >>= 7) > 0) bytes.Insert(0, (byte)((v & 0x7F) | 0x80));
         return bytes;
     }
+}
+
+public class QuantizerTests
+{
+    private static (MidiFile File, MidiTrack Track) Make(params (int Start, int Length, int Pitch)[] notes) => QuantizerHelper.Make(notes);
 
     private static string Show(Measure m) =>
         string.Join(" ", m.Items.Select(i => (i.IsRest ? "r" : string.Join("+", i.Pitches.Select(p => p.Name))) + i.Length + (i.TiedToNext ? "~" : "")));

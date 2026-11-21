@@ -488,3 +488,6 @@ packaging/out/
 
 # The stock rule *.app (macOS bundles) also matches this folder on Windows, where names are case-insensitive.
 !src/PdfEditor.App/
+
+# Samples and pictures made while working; not part of the program.
+Claude outputs/

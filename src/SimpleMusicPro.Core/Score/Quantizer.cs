@@ -41,6 +41,7 @@ public static class Quantizer
 
         var measures = new List<Measure>();
         long start = 0;
+        bool pickup = false;
         int first = 0; // the first segment that can still reach this bar
         while (start < total || measures.Count == 0)
         {
@@ -50,8 +51,15 @@ public static class Quantizer
             // A change of time signature starts a bar of its own, even part-way through one.
             long next = midi.TimeSignatures.Select(t => Slot(t.Time)).Where(s => s > start).DefaultIfEmpty(long.MaxValue).Min();
             if (next < start + length) length = (int)(next - start);
+            // A short bar at the very start, followed at once by the real time signature, is an upbeat: it belongs to that time signature.
+            if (measures.Count == 0 && next == start + length && next != long.MaxValue)
+            {
+                var following = midi.TimeSignatureAt((long)Math.Round(next * unit));
+                if (following.Numerator * 16 / following.Denominator > length) { ts = following; pickup = true; }
+            }
             long barEnd = start + length;
             int beat = Beat(ts.Numerator, ts.Denominator);
+            if (pickup && measures.Count == 0) beat = Math.Min(beat, length); // a one-beat upbeat is one beat
 
             while (first < segments.Count && segments[first].End <= start) first++;
             var items = new List<NotatedItem>();
@@ -75,7 +83,7 @@ public static class Quantizer
             // A bar with nothing in it but a rest is one rest, however long the bar is.
             if (items.Count > 0 && items.All(i => i.IsRest) && items.Sum(i => i.Length) == length) items = [new NotatedItem(0, length, [])];
 
-            measures.Add(new Measure(measures.Count + 1, start, length, ts.Numerator, ts.Denominator, key, items));
+            measures.Add(new Measure(measures.Count + (pickup ? 0 : 1), start, length, ts.Numerator, ts.Denominator, key, items, Pickup: pickup && measures.Count == 0));
             start = barEnd;
         }
         return measures;
