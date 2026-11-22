@@ -24,6 +24,8 @@ public sealed class MidiTrack
     public IReadOnlyList<int> Channels { get; init; } = [];
     public IReadOnlyList<MidiNote> Notes { get; init; } = [];
     public IReadOnlyList<MidiLyric> Lyrics { get; init; } = [];
+    /// <summary>The track's text events: karaoke files keep their words here, a syllable to an event.</summary>
+    public IReadOnlyList<MidiLyric> Texts { get; init; } = [];
 
     public bool IsPercussion => Channels.Count > 0 && Channels.All(c => c == 9);
     public int LowestPitch => Notes.Count == 0 ? 0 : Notes.Min(n => n.Pitch);
@@ -54,6 +56,8 @@ public sealed class MidiFile
     /// <summary>Ticks to a quarter note.</summary>
     public int TicksPerQuarter { get; private init; }
     public IReadOnlyList<MidiTrack> Tracks { get; private init; } = [];
+    /// <summary>Tracks with text events and no notes (karaoke files often keep their words in one); not offered as parts.</summary>
+    public IReadOnlyList<MidiTrack> TextTracks { get; private init; } = [];
     public IReadOnlyList<TempoChange> Tempos { get; private init; } = [];
     public IReadOnlyList<TimeSignatureChange> TimeSignatures { get; private init; } = [];
     public IReadOnlyList<KeySignatureChange> KeySignatures { get; private init; } = [];
@@ -106,6 +110,7 @@ public sealed class MidiFile
         {
             TicksPerQuarter = division,
             Tracks = parts,
+            TextTracks = tracks.Where(tr => tr.Notes.Count == 0 && tr.Lyrics.Count == 0 && tr.Texts.Count > 0).ToList(),
             Tempos = Clean(tempos, x => x.Time),
             TimeSignatures = Clean(times, x => x.Time),
             KeySignatures = Clean(keys, x => x.Time),
@@ -121,6 +126,7 @@ public sealed class MidiFile
         int program = -1;
         var notes = new List<MidiNote>();
         var lyrics = new List<MidiLyric>();
+        var texts = new List<MidiLyric>();
         var channels = new SortedSet<int>();
         // Notes that have started and not yet stopped, by channel and key (a key can be struck again before it ends).
         var open = new Dictionary<(int Channel, int Pitch), Queue<(long Start, int Velocity)>>();
@@ -142,6 +148,7 @@ public sealed class MidiFile
                 {
                     case 0x03 when name.Length == 0: name = Clean(r.Text(length)); break;
                     case 0x04 when instrument.Length == 0: instrument = Clean(r.Text(length)); break;
+                    case 0x01: texts.Add(new MidiLyric(time, r.Text(length))); break;
                     case 0x05: lyrics.Add(new MidiLyric(time, r.Text(length))); break;
                     case 0x51 when length == 3: tempos.Add(new TempoChange(time, (r.Byte() << 16) | (r.Byte() << 8) | r.Byte())); break;
                     case 0x58 when length >= 2: times.Add(new TimeSignatureChange(time, r.Byte(), 1 << r.Byte())); break;
@@ -181,7 +188,7 @@ public sealed class MidiFile
         return new MidiTrack
         {
             Name = name, Instrument = instrument, Program = program,
-            Channels = [.. channels], Notes = notes, Lyrics = lyrics,
+            Channels = [.. channels], Notes = notes, Lyrics = lyrics, Texts = texts,
             MostAtOnce = MostAtOnce(notes),
         };
     }
@@ -203,6 +210,7 @@ public sealed class MidiFile
 
     private sealed class Reader(byte[] d)
     {
+        private static readonly Encoding StrictUtf8 = new UTF8Encoding(false, throwOnInvalidBytes: true);
         public int Position { get; set; }
         public int Remaining => d.Length - Position;
         public int Byte() => Position < d.Length ? d[Position++] : throw new InvalidDataException("The MIDI file ends too soon.");
@@ -212,7 +220,10 @@ public sealed class MidiFile
         public string Text(int count)
         {
             count = Math.Max(0, Math.Min(count, Remaining));
-            var s = Encoding.Latin1.GetString(d, Position, count);
+            // Most files use Latin-1 (or plain ASCII); newer ones UTF-8, which only reads cleanly when it is UTF-8.
+            string s;
+            try { s = StrictUtf8.GetString(d, Position, count); }
+            catch (DecoderFallbackException) { s = Encoding.Latin1.GetString(d, Position, count); }
             Position += count;
             return s;
         }

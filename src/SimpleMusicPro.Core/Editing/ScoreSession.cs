@@ -24,6 +24,8 @@ public sealed class ScoreProject
     public List<RhythmHit> Rhythm { get; set; } = [];
     public bool ShowChords { get; set; } = true;
     public List<ChordMark> Chords { get; set; } = [];
+    public bool ShowLyrics { get; set; } = true;
+    public List<LyricMark> Lyrics { get; set; } = [];
 
     private static readonly JsonSerializerOptions Json = new() { WriteIndented = true };
 
@@ -65,6 +67,9 @@ public sealed class ScoreSession
         session.Project.MidiFile = session.MidiPath;
         session.Project.Title = midi.Title.Length > 0 ? midi.Title : Path.GetFileNameWithoutExtension(path);
         session.Project.VoiceTrack = MelodyTrack(midi);
+        // The song's words, when the file has them, are put on the voice staff's notes to start with.
+        var bars = session.Bars();
+        session.Project.Lyrics = LyricImport.FromMidi(midi, bars);
         return session;
     }
 
@@ -111,8 +116,7 @@ public sealed class ScoreSession
     public ScoreDocument Build()
     {
         if (Midi is null || Midi.Tracks.Count == 0) return new ScoreDocument();
-        int track = Math.Clamp(Project.VoiceTrack, 0, Midi.Tracks.Count - 1);
-        if (_bars is null || _barsTrack != track) { _bars = Quantizer.Voice(Midi, Midi.Tracks[track]); _barsTrack = track; }
+        _bars = Bars();
         RhythmLane? lane = null;
         if (Project.ShowRhythm)
         {
@@ -125,12 +129,57 @@ public sealed class ScoreSession
             chords = new ChordLane();
             chords.Restore(Project.Chords.Where(c => c.Bar < _bars.Count && c.Position < _bars[c.Bar].Length));
         }
+        LyricLane? lyrics = null;
+        if (Project.ShowLyrics)
+        {
+            lyrics = new LyricLane();
+            lyrics.Restore(Project.Lyrics.Where(l => l.Bar < _bars.Count && l.Position < _bars[l.Bar].Length));
+        }
         return new ScoreDocument
         {
             Title = Project.Title, Subtitle = Project.Subtitle, Tempo = Midi.TempoAt(0),
-            Bars = _bars, ShowVoice = Project.ShowVoice, Rhythm = lane, Chords = chords,
+            Bars = _bars, ShowVoice = Project.ShowVoice, Rhythm = lane, Chords = chords, Lyrics = lyrics,
         };
     }
+
+    /// <summary>The bars of the voice track, made once for each track chosen.</summary>
+    private IReadOnlyList<Measure> Bars()
+    {
+        if (Midi is null || Midi.Tracks.Count == 0) return [];
+        int track = Math.Clamp(Project.VoiceTrack, 0, Midi.Tracks.Count - 1);
+        if (_bars is null || _barsTrack != track) { _bars = Quantizer.Voice(Midi, Midi.Tracks[track]); _barsTrack = track; }
+        return _bars;
+    }
+
+    /// <summary>Whether the MIDI file has words to take.</summary>
+    public bool MidiHasWords => Midi is not null && LyricImport.Words(Midi).Count > 0;
+
+    /// <summary>Takes the words from the MIDI file again, onto the notes of the voice staff as it now is, in the place of all the words there; one step.</summary>
+    public int TakeLyricsFromMidi()
+    {
+        if (Midi is null) return 0;
+        var marks = LyricImport.FromMidi(Midi, Bars());
+        Change(p => p.Lyrics = marks);
+        return marks.Count;
+    }
+
+    /// <summary>Writes a syllable at a place (empty text takes it away), as one step. Returns it, or null when taken away.</summary>
+    public LyricMark? SetLyric(int bar, int position, string text, bool hyphen)
+    {
+        var lane = new LyricLane();
+        lane.Restore(Project.Lyrics);
+        LyricMark? mark = null;
+        Change(p =>
+        {
+            mark = lane.Set(bar, position, text, hyphen);
+            p.Lyrics = [.. lane.Marks.OrderBy(m => m.Bar).ThenBy(m => m.Position)];
+        });
+        return mark;
+    }
+
+    /// <summary>Takes away the syllable at a place, as one step.</summary>
+    public void RemoveLyric(int bar, int position) =>
+        Change(p => p.Lyrics.RemoveAll(m => m.Bar == bar && m.Position == position));
 
     /// <summary>Writes a chord at a place (in the place of the one there), as one step that can be undone.</summary>
     public ChordMark SetChord(int bar, int position, string name)

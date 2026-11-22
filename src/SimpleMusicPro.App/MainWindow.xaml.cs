@@ -163,6 +163,9 @@ public partial class MainWindow : Window
             RhythmCheck.IsChecked = _session.Project.ShowRhythm;
             RhythmLabelBox.Text = _session.Project.RhythmLabel;
             VoiceCheck.IsChecked = _session.Project.ShowVoice;
+            LyricsCheck.IsChecked = _session.Project.ShowLyrics;
+            LyricsCheck.IsEnabled = _session.Project.ShowVoice;
+            TakeWordsButton.Visibility = _session.MidiHasWords ? Visibility.Visible : Visibility.Collapsed;
             TrackBox.Items.Clear();
             for (int i = 0; i < _session.Midi.Tracks.Count; i++)
             {
@@ -187,7 +190,7 @@ public partial class MainWindow : Window
     private void Stack_Changed(object sender, RoutedEventArgs e)
     {
         if (_updating || _session is null) return;
-        bool rhythm = RhythmCheck.IsChecked == true, voice = VoiceCheck.IsChecked == true, chords = ChordsCheck.IsChecked == true;
+        bool rhythm = RhythmCheck.IsChecked == true, voice = VoiceCheck.IsChecked == true, chords = ChordsCheck.IsChecked == true, lyrics = LyricsCheck.IsChecked == true;
         if (!rhythm && !voice)
         {
             // A score needs at least one staff.
@@ -195,9 +198,21 @@ public partial class MainWindow : Window
             Show("A score needs at least one staff.");
             return;
         }
-        _session.Change(p => { p.ShowRhythm = rhythm; p.ShowVoice = voice; p.ShowChords = chords; });
+        _session.Change(p => { p.ShowRhythm = rhythm; p.ShowVoice = voice; p.ShowChords = chords; p.ShowLyrics = lyrics; });
+        LyricsCheck.IsEnabled = voice;   // the words go under the voice staff
         _selected = null;
         Refresh();
+    }
+
+    private void TakeWords_Click(object sender, RoutedEventArgs e)
+    {
+        if (_session is null) return;
+        if (_session.Project.Lyrics.Count > 0 && MessageBox.Show(this, "Put the words from the MIDI file on the notes again, in the place of the words there now? Undo brings these back.",
+                "SimpleMusic Pro", MessageBoxButton.OKCancel, MessageBoxImage.Question) != MessageBoxResult.OK) return;
+        int count = _session.TakeLyricsFromMidi();
+        _selected = null;
+        Refresh();
+        Show(count == 0 ? "No words from the MIDI file fall on the notes of this track." : $"{count} syllables from the MIDI file put on the notes.");
     }
 
     private void Track_Changed(object sender, SelectionChangedEventArgs e)
@@ -308,6 +323,7 @@ public partial class MainWindow : Window
         else if (ctrl && e.Key == Key.O) { Open_Click(this, e); e.Handled = true; }
         else if (e.Key == Key.Delete && _selected is { Lane: LaneKind.Rhythm } strum) { DeleteStrum(strum); e.Handled = true; }
         else if (e.Key == Key.Delete && _selected is { Lane: LaneKind.Chords } chord) { DeleteChord(chord); e.Handled = true; }
+        else if (e.Key == Key.Delete && _selected is { Lane: LaneKind.Lyrics } word) { DeleteLyric(word); e.Handled = true; }
     }
 
     private void Preview_MouseWheel(object sender, MouseWheelEventArgs e)
@@ -411,6 +427,100 @@ public partial class MainWindow : Window
             Canvas.SetTop(sign, y - 9);
             overlay.Children.Add(sign);
         }
+
+        // The words' +: under the note, where its syllable would be written.
+        foreach (var plus in Placeholders.ForLyrics(_score, note))
+        {
+            if (LyricPlace(plus.Bar, plus.Position) is not { } at) continue;
+            string what = $"Add words here (bar {_score.Bars[plus.Bar].Number}, {BeatName(plus.Position)})";
+            var sign = new Button { Template = PlusTemplate, Width = 18, Height = 18, Cursor = Cursors.Hand, ToolTip = what };
+            System.Windows.Automation.AutomationProperties.SetName(sign, what);
+            sign.Click += (_, _) => OpenLyricEditor(plus.Bar, plus.Position);
+            Canvas.SetLeft(sign, at.X - 9);
+            Canvas.SetTop(sign, at.Y - 9);
+            _overlays[at.Page].Children.Add(sign);
+        }
+    }
+
+    /// <summary>Where a syllable of a note is written on the screen: its page, and the middle of its place.</summary>
+    private (int Page, double X, double Y)? LyricPlace(int barIndex, int position)
+    {
+        var bar = _engraved?.Bars.FirstOrDefault(b => b.Bar == barIndex);
+        var band = _engraved?.Bands.FirstOrDefault(b => b.Lane == LaneKind.Lyrics && b.FirstBar <= barIndex && barIndex <= b.LastBar);
+        if (bar is null || band is null || bar.Page != band.Page || bar.Page >= _overlays.Count) return null;
+        return (bar.Page, (bar.XOf(position) + 0.6 * 5.6) * Scale, (band.Bottom - 1.6 * 5.6) * Scale);
+    }
+
+    // ------------------------------------------------------------------ lyrics
+
+    private TextBox? _lyricBox;
+
+    /// <summary>
+    /// A box for typing the syllable of a note, where it is written. Space keeps it and goes on to the next note, a
+    /// hyphen does the same and joins it to the next syllable, Enter keeps it and closes the box, Esc closes it as it was.
+    /// </summary>
+    private void OpenLyricEditor(int bar, int position)
+    {
+        if (_session is null || _score is null || LyricPlace(bar, position) is not { } at) return;
+        CloseLyricEditor();
+        var current = _score.Lyrics?.At(bar, position);
+        var box = new TextBox
+        {
+            Text = current?.Text ?? "", Width = 110, FontFamily = new FontFamily("Times New Roman"), FontSize = Math.Max(13, 1.9 * 5.6 * Scale),
+            TextAlignment = TextAlignment.Center, Padding = new Thickness(2, 0, 2, 0),
+            Background = Brushes.White, Foreground = Brushes.Black, BorderBrush = Green, BorderThickness = new Thickness(1.5),
+        };
+        System.Windows.Automation.AutomationProperties.SetName(box, $"Words of bar {_score.Bars[bar].Number}, {BeatName(position)}");
+        bool done = false;
+        void Finish(bool keep, bool? hyphen, bool next)
+        {
+            if (done) return;
+            done = true;
+            string text = box.Text.Trim();
+            CloseLyricEditor();
+            if (keep) _session.SetLyric(bar, position, text, hyphen ?? current?.Hyphen ?? false);
+            var following = next ? Placeholders.NextSungNote(_session.Build(), bar, position) : null;
+            _selected = null;
+            Refresh();
+            if (following is { } n)
+            {
+                _selected = _engraved?.Items.FirstOrDefault(i => i.Lane == LaneKind.Voice && i.Bar == n.Bar && i.Position == n.Position);
+                DrawOverlays();
+                OpenLyricEditor(n.Bar, n.Position);
+            }
+            else Show(keep ? "Words kept. Click a word to change it." : "Left as it was.");
+        }
+        box.PreviewKeyDown += (_, e) =>
+        {
+            if (e.Key == Key.Space) { Finish(true, false, true); e.Handled = true; }
+            else if (e.Key is Key.OemMinus or Key.Subtract) { Finish(true, box.Text.Trim().Length > 0, true); e.Handled = true; }
+            else if (e.Key == Key.Enter) { Finish(true, null, false); e.Handled = true; }
+            else if (e.Key == Key.Escape) { Finish(false, null, false); e.Handled = true; }
+        };
+        box.LostKeyboardFocus += (_, _) => { if (!done && _lyricBox == box) Finish(true, null, false); };
+        var overlay = _overlays[at.Page];
+        Canvas.SetLeft(box, at.X - box.Width / 2);
+        Canvas.SetTop(box, at.Y - box.FontSize * 0.75);
+        overlay.Children.Add(box);
+        _lyricBox = box;
+        Show("Type the syllable. Space: next note. Hyphen (-): next syllable of the word. Enter: done. Esc: leave it.");
+        box.Dispatcher.BeginInvoke(() => { Keyboard.Focus(box); box.SelectAll(); box.BringIntoView(); }, System.Windows.Threading.DispatcherPriority.Input);
+    }
+
+    private void CloseLyricEditor()
+    {
+        var box = _lyricBox;
+        _lyricBox = null;
+        if (box?.Parent is Canvas c) c.Children.Remove(box);
+    }
+
+    private void DeleteLyric(ItemMap word)
+    {
+        if (_session is null) return;
+        _session.RemoveLyric(word.Bar, word.Position);
+        _selected = null;
+        Refresh();
+        Show("Words deleted. Undo brings them back.");
     }
 
     // ------------------------------------------------------------------ chords
@@ -563,10 +673,12 @@ public partial class MainWindow : Window
         int length = StrumLength;
         try
         {
+            var cut = _score.Rhythm?.At(plus.Bar, plus.Position);   // a strum sounding on there is shortened by the new one
             var added = _session.AddStrum(plus.Bar, plus.Position, length, RestButton.IsChecked == true, RestButton.IsChecked != true && AccentButton.IsChecked == true);
             Refresh();
             SelectStrum(added);   // selected, so a length chosen now changes it
             if (added.Length < length) Show($"Only a {LengthName(added.Length)} fits before the end of the bar, so the strum is that long.");
+            else if (cut is not null) Show($"Added. The strum before it is now {Article(LengthName(added.Position - cut.Position))} {LengthName(added.Position - cut.Position)}, ending where this one starts.");
             else Show("Added. To change it, choose another length, Dot, Rest or Accent while it is selected.");
         }
         catch (ArgumentOutOfRangeException ex) { Show(ex.Message.Split(" (Parameter")[0]); }
@@ -576,6 +688,7 @@ public partial class MainWindow : Window
     {
         SelectAt(sender, e);
         if (_selected is { Lane: LaneKind.Chords } chord) ChangeChord(chord);
+        else if (_selected is { Lane: LaneKind.Lyrics } word) { OpenLyricEditor(word.Bar, word.Position); e.Handled = true; }
     }
 
     /// <summary>Selects what is under the mouse (the smallest thing there), and says what can be done with it.</summary>
@@ -598,10 +711,12 @@ public partial class MainWindow : Window
             string noChord = _score.Chords is null ? "" : " (No chord here: one stands within a quarter note of it.)";
             Show(where + (strum && chord ? "click a + above it to add a strum or a chord there."
                 : strum ? "click the + above it to add a strum there." + noChord
-                : chord ? "a strum sounds there already; the + in the chord row adds a chord."
-                : "a strum sounds there already." + noChord));
+                : chord ? "a strum starts there already (click it to change it); the + in the chord row adds a chord."
+                : "a strum starts there already: click it to change it." + noChord)
+                + (Placeholders.ForLyrics(_score, (v.Bar, v.Position)).Count > 0 ? " The + under it adds words." : ""));
         }
         else if (_selected is { Lane: LaneKind.Chords }) Show("A chord: pick another from the list to change it; Delete takes it away.");
+        else if (_selected is { Lane: LaneKind.Lyrics }) Show("Words: type to change them; Delete takes them away.");
         DrawOverlays();
     }
 
@@ -615,6 +730,22 @@ public partial class MainWindow : Window
             var item = new MenuItem { Header = header };
             item.Click += (_, _) => action();
             menu.Items.Add(item);
+        }
+        if (_selected is { Lane: LaneKind.Lyrics } word)
+        {
+            var mark = _score?.Lyrics?.At(word.Bar, word.Position);
+            Add("Change the words…", () => OpenLyricEditor(word.Bar, word.Position));
+            if (mark is not null)
+                Add(mark.Hyphen ? "Take the hyphen away" : "Join to the next syllable (hyphen)", () =>
+                {
+                    _session.SetLyric(mark.Bar, mark.Position, mark.Text, !mark.Hyphen);
+                    Refresh();
+                });
+            menu.Items.Add(new Separator());
+            Add("Delete", () => DeleteLyric(word));
+            menu.IsOpen = true;
+            e.Handled = true;
+            return;
         }
         if (_selected is { Lane: LaneKind.Chords } chord)
         {

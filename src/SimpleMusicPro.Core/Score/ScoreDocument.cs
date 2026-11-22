@@ -105,6 +105,9 @@ public sealed class ScoreDocument
     /// <summary>The row of chord diagrams above the staves, or null for none.</summary>
     public ChordLane? Chords { get; set; }
 
+    /// <summary>The words under the voice staff, or null for none.</summary>
+    public LyricLane? Lyrics { get; set; }
+
     /// <summary>Chords stand no closer together than a quarter note, for now (in sixteenths).</summary>
     public const int ChordStep = 4;
 

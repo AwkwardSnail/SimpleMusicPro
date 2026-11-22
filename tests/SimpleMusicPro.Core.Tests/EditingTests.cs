@@ -51,7 +51,8 @@ public class EditingTests
         score.Rhythm!.Add(1, 0, 8, 16);                   // a half on beats 1 and 2
         var plus = Placeholders.ForRhythm(score, (1, 11));
         Assert.Equal([(LaneKind.Rhythm, 1, 11)], plus.Select(p => (p.Lane, p.Bar, p.Position)).ToArray());
-        Assert.Empty(Placeholders.ForRhythm(score, (1, 3)));   // a strum sounds there already
+        Assert.Empty(Placeholders.ForRhythm(score, (1, 0)));   // a strum starts there: click it to change it
+        Assert.Single(Placeholders.ForRhythm(score, (1, 3)));  // inside the half: a strum there shortens it
     }
 
     [Fact]

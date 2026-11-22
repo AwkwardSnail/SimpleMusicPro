@@ -25,7 +25,7 @@ public sealed record ScoreOptions
 }
 
 /// <summary>Which staff of the stack something belongs to.</summary>
-public enum LaneKind { Rhythm, Voice, Chords }
+public enum LaneKind { Rhythm, Voice, Chords, Lyrics }
 
 /// <summary>Where a bar was drawn: its page, its place, and where in it each moment that has something at it lies.</summary>
 /// <param name="Bar">The bar's index in the score's list of bars.</param>
@@ -79,6 +79,9 @@ public static class ScoreEngraver
     // A chord diagram, in staff spaces: the gap between strings, a fret's height, the name's size, the whole row's
     // height, and where its middle stands from a column's x (over the middle of a notehead or slash).
     private const double StringGap = 1.0, FretHeight = 1.2, ChordNameSize = 2.0, ChordRowHeight = 11.5, ChordCentre = 0.6;
+    // The words under the voice staff, in staff spaces: the letters' size, the room the line adds, where its baseline
+    // stands below the staff's top line, and the room after a word and after a syllable followed by a hyphen.
+    private const double LyricSize = 1.9, LyricRowHeight = 2.2, LyricBaseline = 7.8, WordGap = 0.9, HyphenGap = 1.9;
 
     private static readonly PathStyle Ink = new() { Fill = PdfColor.Black };
 
@@ -96,12 +99,14 @@ public static class ScoreEngraver
         double ss = options.StaffSpace;
         double left = options.Margin, right = options.PageWidth - options.Margin;
         bool rhythm = score.Rhythm is not null, voice = score.ShowVoice || !rhythm;
+        bool lyrics = voice && score.Lyrics is not null;
 
         var lines = Plan(score, voice, ss, right - left, options.JoinEmptyBars);
-        // Vertical layout of a line: the chord diagrams (if any) above the rhythm staff (if any) above the voice staff.
+        // Vertical layout of a line: the chord diagrams (if any) above the rhythm staff (if any) above the voice staff,
+        // with the words (if any) under it.
         double chordHeight = score.Chords is not null ? ChordRowHeight * ss : 0;
-        double rhythmHeight = rhythm ? 6.5 * ss : 0, voiceHeight = voice ? 11.5 * ss : 0;
-        double lineHeight = 3.5 * ss + chordHeight + rhythmHeight + voiceHeight + 1.5 * ss;
+        double rhythmHeight = rhythm ? 6.5 * ss : 0, voiceHeight = voice ? 11.5 * ss : 0, lyricHeight = lyrics ? LyricRowHeight * ss : 0;
+        double lineHeight = 3.5 * ss + chordHeight + rhythmHeight + voiceHeight + lyricHeight + 1.5 * ss;
         double headingHeight = HasHeading(score) ? 64 : 0;
         var pages = new List<List<LinePlan>> { new() };
         double y = options.Margin + headingHeight;
@@ -174,6 +179,7 @@ public static class ScoreEngraver
         public List<bool> BeamUp { get; } = [];
         public List<List<PlacedHit>> HitBeams { get; } = [];
         public List<ChordMark> Chords { get; } = [];
+        public List<LyricMark> Lyrics { get; } = [];
         /// <summary>More than 1 for several empty bars in a row, written as one.</summary>
         public int MultiRest = 1;
         public int LastIndex => Index + MultiRest - 1;
@@ -207,14 +213,16 @@ public static class ScoreEngraver
     {
         var all = score.Bars;
         var placed = new List<PlacedBar>();
-        bool Empty(int k) => all[k].IsWholeRest && (score.Rhythm is null || !score.Rhythm.InBar(k).Any()) && (score.Chords is null || !score.Chords.InBar(k).Any());
+        var lyrics = voice ? score.Lyrics : null;
+        bool Empty(int k) => all[k].IsWholeRest && (score.Rhythm is null || !score.Rhythm.InBar(k).Any()) && (score.Chords is null || !score.Chords.InBar(k).Any())
+                             && (lyrics is null || !lyrics.InBar(k).Any());
         for (int k = 0; k < all.Count; k++)
         {
             var m = all[k];
             int run = 1;
             if (join && Empty(k) && !m.Pickup)
                 while (k + run < all.Count && Empty(k + run) && all[k + run].Numerator == m.Numerator && all[k + run].Denominator == m.Denominator && all[k + run].KeySharps == m.KeySharps) run++;
-            if (run < 2) { placed.Add(PlaceBar(m, k, voice, score.Rhythm, score.Chords)); continue; }
+            if (run < 2) { placed.Add(PlaceBar(m, k, voice, score.Rhythm, score.Chords, lyrics)); continue; }
             placed.Add(new PlacedBar { Measure = m, Index = k, MultiRest = run, FixedWidth = 10, StretchWidth = 0 });
             k += run - 1;
         }
@@ -258,7 +266,7 @@ public static class ScoreEngraver
     private static int NominalLength(Measure m) => m.Numerator * 16 / m.Denominator;
 
     /// <summary>Places a bar: what each staff has in it, and one column for each moment something starts in any staff.</summary>
-    private static PlacedBar PlaceBar(Measure measure, int index, bool voice, RhythmLane? rhythm, ChordLane? chords)
+    private static PlacedBar PlaceBar(Measure measure, int index, bool voice, RhythmLane? rhythm, ChordLane? chords, LyricLane? lyrics)
     {
         var bar = new PlacedBar { Measure = measure, Index = index };
         double head = Bravura.Get("noteheadBlack").Advance;
@@ -347,9 +355,14 @@ public static class ScoreEngraver
         if (chords is not null)
             foreach (var mark in chords.InBar(index).Where(m => m.Position < measure.Length)) bar.Chords.Add(mark);
         positions = positions.Concat(bar.Chords.Select(c => c.Position)).Distinct().Order().ToList();
+        // A syllable is sung on a note; one left where there is none (another track chosen) still has its place.
+        if (lyrics is not null)
+            foreach (var mark in lyrics.InBar(index).Where(m => m.Position < measure.Length)) bar.Lyrics.Add(mark);
+        positions = positions.Concat(bar.Lyrics.Select(l => l.Position)).Distinct().Order().ToList();
         if (positions.Count == 0) positions.Add(0);
         double fixedX = 1.0, stretchX = 0;
         double? chordRight = null;   // where the last chord's diagram (or name) ends, with a little room
+        double? lyricRight = null;   // where the last syllable ends, with room for a space or a hyphen
         for (int c = 0; c < positions.Count; c++)
         {
             int pos = positions[c];
@@ -358,6 +371,14 @@ public static class ScoreEngraver
                 .Concat(bar.Hits.Where(h => h.Position == pos).Select(h => h.Rest ? Bravura.Get(RestGlyph(h.Value)).Advance : SlashWidth + (h.Dotted ? 0.7 : 0)))
                 .DefaultIfEmpty(0).Max();
             double colFixed = fixedX + pre;
+            if (bar.Lyrics.FirstOrDefault(m => m.Position == pos) is { } lyric)
+            {
+                // Words never run into each other: the bar is made wider where they are long.
+                double half = LyricWidth(lyric.Text) / 2;
+                double leftEdge = colFixed + ChordCentre - half, limit = lyricRight ?? 0.3;
+                if (leftEdge < limit) colFixed += limit - leftEdge;
+                lyricRight = colFixed + ChordCentre + half + (lyric.Hyphen ? HyphenGap : WordGap);
+            }
             if (bar.Chords.FirstOrDefault(m => m.Position == pos) is { } chord)
             {
                 // Diagrams never touch: the bar is made wider where they stand close together.
@@ -381,7 +402,7 @@ public static class ScoreEngraver
             var col = bar.Columns.First(c => c.Position == h.Position);
             (h.Fixed, h.Stretch) = (col.Fixed, col.Stretch);
         }
-        fixedX = Math.Max(fixedX, (chordRight ?? 0) - 0.6);
+        fixedX = Math.Max(fixedX, Math.Max(chordRight ?? 0, lyricRight ?? 0) - 0.6);
         bar.FixedWidth = fixedX + 0.6;
         bar.StretchWidth = stretchX;
         BeamNotes(bar);
@@ -485,6 +506,11 @@ public static class ScoreEngraver
         }
         bool chords = score.Chords is not null;
         if (chords) bands.Add(new LaneBand(page, firstBar, lastBar, LaneKind.Chords, line.ChordTop, line.ChordTop + ChordRowHeight * ss));
+        bool lyrics = voice && score.Lyrics is not null;
+        double lyricBase = top + LyricBaseline * ss;
+        var lyricStyle = new TextStyle { Font = StandardFont.Times, Size = (float)(LyricSize * ss) };
+        var words = new List<(LyricMark Mark, double Left, double Right)>();
+        if (lyrics) bands.Add(new LaneBand(page, firstBar, lastBar, LaneKind.Lyrics, lyricBase - 2.4 * ss, lyricBase + 1.0 * ss));
 
         // The tempo mark stands above everything else on the first line, above the rhythm staff's name when there is one.
         double markTop = chords ? line.ChordTop - 1.0 * ss
@@ -546,7 +572,26 @@ public static class ScoreEngraver
                 var bounds = DrawChord(canvas, mark.Name, Xof(col.Fixed, col.Stretch) + ChordCentre * ss, line.ChordTop, ss);
                 itemMaps.Add(new ItemMap(page, LaneKind.Chords, b.Index, mark.Position, 0, bounds));
             }
+            if (lyrics)
+                foreach (var mark in b.Lyrics)
+                {
+                    // Each syllable centred under its note.
+                    var col = b.Columns.First(c => c.Position == mark.Position);
+                    double w = canvas.MeasureText(mark.Text, lyricStyle), cx = Xof(col.Fixed, col.Stretch) + ChordCentre * ss;
+                    canvas.Text(cx - w / 2, lyricBase, mark.Text, lyricStyle);                    words.Add((mark, cx - w / 2, cx + w / 2));
+                    itemMaps.Add(new ItemMap(page, LaneKind.Lyrics, b.Index, mark.Position, 0,
+                        new PdfRect(cx - Math.Max(w, 2 * ss) / 2 - 0.3 * ss, lyricBase - LyricSize * ss, Math.Max(w, 2 * ss) + 0.6 * ss, LyricSize * ss * 1.3)));
+                }
             barX += width;
+        }
+
+        // Hyphens: halfway between a syllable and the next one of its word, or just after it at the end of the line.
+        for (int k = 0; k < words.Count; k++)
+        {
+            if (!words[k].Mark.Hyphen) continue;
+            double from = words[k].Right, to = k + 1 < words.Count ? words[k + 1].Left : from + 1.6 * ss;
+            double mid = (from + to) / 2, half = Math.Min(0.45 * ss, Math.Max(0.15 * ss, (to - from) / 2 - 0.2 * ss));
+            canvas.Line(new PdfPoint(mid - half, lyricBase - 0.55 * ss), new PdfPoint(mid + half, lyricBase - 0.55 * ss), 0.13 * ss);
         }
 
         // Ties of the voice staff, now that the places are known (one may run into the next bar or off the line).
@@ -737,6 +782,30 @@ public static class ScoreEngraver
         double StemX(PlacedHit h) => xOf(h) + SlashWidth * ss - Stem * ss;
         foreach (var h in g) canvas.Line(new PdfPoint(StemX(h) + Stem * ss / 2, baseY - half), new PdfPoint(StemX(h) + Stem * ss / 2, end), Stem * ss);
         BeamBars(canvas, g.Select(h => (StemX(h), h.Flags)).ToList(), _ => end, true, ss);
+    }
+
+    /// <summary>Times-Roman's widths of the printable ASCII letters (space to ~), in thousandths of the size.</summary>
+    private static readonly short[] TimesWidths =
+    [
+        250, 333, 408, 500, 500, 833, 778, 333, 333, 333, 500, 564, 250, 333, 250, 278,
+        500, 500, 500, 500, 500, 500, 500, 500, 500, 500, 278, 278, 564, 564, 564, 444,
+        921, 722, 667, 667, 722, 611, 556, 722, 722, 333, 389, 722, 611, 889, 722, 722,
+        556, 722, 667, 556, 611, 722, 722, 944, 722, 722, 611, 333, 278, 333, 469, 500,
+        333, 444, 500, 444, 500, 444, 333, 500, 500, 278, 278, 500, 278, 778, 500, 500,
+        500, 500, 333, 389, 278, 500, 500, 722, 500, 500, 444, 480, 200, 480, 541,
+    ];
+
+    /// <summary>How wide a syllable is written, in staff spaces (a letter with an accent as wide as the letter alone).</summary>
+    private static double LyricWidth(string text)
+    {
+        double total = 0;
+        foreach (char ch in text)
+        {
+            char c = ch;
+            if (c > 126) { string d = ch.ToString().Normalize(System.Text.NormalizationForm.FormD); if (d.Length > 0) c = d[0]; }
+            total += c is >= ' ' and <= '~' ? TimesWidths[c - ' '] : 500;
+        }
+        return total * LyricSize / 1000;
     }
 
     /// <summary>How far a chord's name and diagram reach to the left and right of its middle, in staff spaces (the name's width a close guess).</summary>
