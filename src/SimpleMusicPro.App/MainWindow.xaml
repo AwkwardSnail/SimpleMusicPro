@@ -58,6 +58,7 @@
                         <TextBox x:Name="SubtitleBox" Margin="0,2,0,16" LostKeyboardFocus="Heading_Changed" />
 
                         <TextBlock Text="Staves, top to bottom" FontWeight="SemiBold" Margin="0,0,0,8" />
+                        <CheckBox x:Name="ChordsCheck" Content="Chord diagrams" Margin="0,0,0,12" Click="Stack_Changed" />
                         <CheckBox x:Name="RhythmCheck" Content="Rhythm staff" Margin="0,0,0,4" Click="Stack_Changed" />
                         <TextBlock Text="Name shown at the left" Foreground="{StaticResource GreenDimBrush}" Margin="24,0,0,0" />
                         <TextBox x:Name="RhythmLabelBox" Margin="24,2,0,12" LostKeyboardFocus="Heading_Changed" />
@@ -69,6 +70,11 @@
                             To add a strum, click a note in the voice staff: a + appears above it. Choose a length
                             in the toolbar, then click the +. Click a strum to select it; a length, Dot, Rest or
                             Accent chosen then changes it. Right-click a strum for more, or press Delete.
+                        </TextBlock>
+                        <TextBlock TextWrapping="Wrap" Foreground="{StaticResource GreenDimBrush}" Margin="0,10,0,0">
+                            To add a chord, click a note or a strum: a + appears above it in the chord row. Click
+                            the + and pick a chord from the list, or type its name to find it. Chords stand at least
+                            a quarter note apart. Click a chord to change it; Delete takes it away.
                         </TextBlock>
                     </StackPanel>
                 </ScrollViewer>

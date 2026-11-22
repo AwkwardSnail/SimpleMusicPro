@@ -103,6 +103,21 @@ public sealed class ScoreDocument
     /// <summary>The rhythm staff above the voice staff, or null for none.</summary>
     public RhythmLane? Rhythm { get; set; }
 
-    /// <summary>Chords stand on the beat: no closer together than a quarter note, for now (in sixteenths).</summary>
+    /// <summary>The row of chord diagrams above the staves, or null for none.</summary>
+    public ChordLane? Chords { get; set; }
+
+    /// <summary>Chords stand no closer together than a quarter note, for now (in sixteenths).</summary>
     public const int ChordStep = 4;
+
+    /// <summary>A place in a bar as sixteenths from the start of the score, to tell how far apart two places are across bar lines.</summary>
+    public int Moment(int bar, int position)
+    {
+        int at = 0;
+        for (int i = 0; i < bar && i < Bars.Count; i++) at += Bars[i].Length;
+        return at + position;
+    }
+
+    /// <summary>Whether a chord at a place would stand closer than a quarter note to another chord (one at that very place excepted).</summary>
+    public bool ChordTooClose(int bar, int position) =>
+        Chords is not null && Chords.Marks.Any(m => !(m.Bar == bar && m.Position == position) && Math.Abs(Moment(m.Bar, m.Position) - Moment(bar, position)) < ChordStep);
 }

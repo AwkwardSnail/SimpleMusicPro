@@ -159,6 +159,7 @@ public partial class MainWindow : Window
             Panel.IsEnabled = true;
             TitleBox.Text = _session.Project.Title;
             SubtitleBox.Text = _session.Project.Subtitle;
+            ChordsCheck.IsChecked = _session.Project.ShowChords;
             RhythmCheck.IsChecked = _session.Project.ShowRhythm;
             RhythmLabelBox.Text = _session.Project.RhythmLabel;
             VoiceCheck.IsChecked = _session.Project.ShowVoice;
@@ -186,7 +187,7 @@ public partial class MainWindow : Window
     private void Stack_Changed(object sender, RoutedEventArgs e)
     {
         if (_updating || _session is null) return;
-        bool rhythm = RhythmCheck.IsChecked == true, voice = VoiceCheck.IsChecked == true;
+        bool rhythm = RhythmCheck.IsChecked == true, voice = VoiceCheck.IsChecked == true, chords = ChordsCheck.IsChecked == true;
         if (!rhythm && !voice)
         {
             // A score needs at least one staff.
@@ -194,7 +195,7 @@ public partial class MainWindow : Window
             Show("A score needs at least one staff.");
             return;
         }
-        _session.Change(p => { p.ShowRhythm = rhythm; p.ShowVoice = voice; });
+        _session.Change(p => { p.ShowRhythm = rhythm; p.ShowVoice = voice; p.ShowChords = chords; });
         _selected = null;
         Refresh();
     }
@@ -306,6 +307,7 @@ public partial class MainWindow : Window
         else if (ctrl && e.Key == Key.S) { Save(saveAs: shift); e.Handled = true; }
         else if (ctrl && e.Key == Key.O) { Open_Click(this, e); e.Handled = true; }
         else if (e.Key == Key.Delete && _selected is { Lane: LaneKind.Rhythm } strum) { DeleteStrum(strum); e.Handled = true; }
+        else if (e.Key == Key.Delete && _selected is { Lane: LaneKind.Chords } chord) { DeleteChord(chord); e.Handled = true; }
     }
 
     private void Preview_MouseWheel(object sender, MouseWheelEventArgs e)
@@ -389,6 +391,138 @@ public partial class MainWindow : Window
             Canvas.SetTop(sign, y - 9);
             _overlays[bar.Page].Children.Add(sign);
         }
+
+        // The chord row's +: over a note or a strum, on the beat it falls in.
+        (int, int)? moment = _selected is { Lane: LaneKind.Voice or LaneKind.Rhythm } m ? (m.Bar, m.Position) : null;
+        foreach (var plus in Placeholders.ForChords(_score, moment))
+        {
+            var bar = _engraved.Bars.FirstOrDefault(b => b.Bar == plus.Bar);
+            var band = _engraved.Bands.FirstOrDefault(b => b.Lane == LaneKind.Chords && b.FirstBar <= plus.Bar && plus.Bar <= b.LastBar);
+            if (bar is null || band is null || bar.Page != band.Page) continue;
+            // Where the diagram would stand: its middle over the note, halfway down the row.
+            double x = (bar.XOf(plus.Position) + 0.6 * 5.6) * Scale, y = (band.Top + 5.5 * 5.6) * Scale;
+            string what = $"Add a chord here (bar {_score.Bars[plus.Bar].Number}, {BeatName(plus.Position)})";
+            var sign = new Button { Template = PlusTemplate, Width = 18, Height = 18, Cursor = Cursors.Hand, ToolTip = what };
+            System.Windows.Automation.AutomationProperties.SetName(sign, what);
+            var overlay = _overlays[bar.Page];
+            var anchor = new Rect(x - 9, y - 9, 18, 18);
+            sign.Click += (_, _) => OpenChordPicker(overlay, anchor, plus.Bar, plus.Position, null);
+            Canvas.SetLeft(sign, x - 9);
+            Canvas.SetTop(sign, y - 9);
+            overlay.Children.Add(sign);
+        }
+    }
+
+    // ------------------------------------------------------------------ chords
+
+    private Popup? _picker;
+
+    /// <summary>
+    /// The list of chords to pick from, under the + or the chord clicked: each chord's diagram and name, narrowed
+    /// by what is typed in the box at its top. Enter takes the first chord shown (or, when none is, the name typed,
+    /// written without a diagram); Esc closes it.
+    /// </summary>
+    private void OpenChordPicker(Canvas overlay, Rect anchor, int bar, int position, string? current)
+    {
+        if (_picker is not null) _picker.IsOpen = false;
+        var filter = new TextBox { Margin = new Thickness(0, 0, 0, 6) };
+        System.Windows.Automation.AutomationProperties.SetName(filter, "Chord name");
+        var hint = new TextBlock
+        {
+            Text = "Type a name to narrow the list (Am, G7, D/F#). Enter takes the first.",
+            Foreground = (Brush)FindResource("GreenDimBrush"), TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 0, 0, 8), FontSize = 13.5,
+        };
+        var list = new WrapPanel { Width = 7 * 76 };
+        var scroll = new ScrollViewer { Content = list, MaxHeight = 430, VerticalScrollBarVisibility = ScrollBarVisibility.Auto };
+        var panel = new StackPanel();
+        panel.Children.Add(filter);
+        panel.Children.Add(hint);
+        panel.Children.Add(scroll);
+        var popup = new Popup
+        {
+            Child = new Border
+            {
+                Background = (Brush)FindResource("BarBrush"), BorderBrush = (Brush)FindResource("LineHoverBrush"),
+                BorderThickness = new Thickness(1), CornerRadius = new CornerRadius(6), Padding = new Thickness(10), Child = panel,
+            },
+            PlacementTarget = overlay, Placement = PlacementMode.Bottom, PlacementRectangle = anchor,
+            StaysOpen = false, AllowsTransparency = true,
+        };
+        void Pick(string name)
+        {
+            popup.IsOpen = false;
+            PlaceChord(bar, position, name);
+        }
+        void Fill()
+        {
+            list.Children.Clear();
+            foreach (var shape in ChordLibrary.Search(filter.Text))
+            {
+                var content = new StackPanel();
+                content.Children.Add(new TextBlock { Text = shape.Name, HorizontalAlignment = HorizontalAlignment.Center, FontWeight = FontWeights.SemiBold, FontSize = 14 });
+                content.Children.Add(new ChordIcon(shape) { Margin = new Thickness(0, 2, 0, 0) });
+                var button = new Button { Content = content, Width = 70, Margin = new Thickness(3), Padding = new Thickness(2, 4, 2, 4), ToolTip = shape.ToString() };
+                if (shape.Name == current) button.BorderBrush = Green;
+                System.Windows.Automation.AutomationProperties.SetName(button, shape.Name);
+                string name = shape.Name;
+                button.Click += (_, _) => Pick(name);
+                list.Children.Add(button);
+            }
+            if (list.Children.Count == 0)
+                list.Children.Add(new TextBlock
+                {
+                    Text = $"There is no diagram for “{filter.Text.Trim()}”. Enter writes the name without one.",
+                    TextWrapping = TextWrapping.Wrap, Width = list.Width - 10, Margin = new Thickness(4),
+                });
+        }
+        filter.TextChanged += (_, _) => Fill();
+        filter.PreviewKeyDown += (_, e) =>
+        {
+            if (e.Key == Key.Escape) { popup.IsOpen = false; e.Handled = true; }
+            else if (e.Key == Key.Enter)
+            {
+                string? name = ChordLibrary.Search(filter.Text).FirstOrDefault()?.Name ?? (filter.Text.Trim().Length > 0 ? filter.Text.Trim() : null);
+                if (name is not null) Pick(name);
+                e.Handled = true;
+            }
+        };
+        popup.Opened += (_, _) => filter.Dispatcher.BeginInvoke(() => Keyboard.Focus(filter), System.Windows.Threading.DispatcherPriority.Input);
+        Fill();
+        _picker = popup;
+        // Opened once the click that asked for it is over, so that click does not close it at once.
+        Dispatcher.BeginInvoke(() => popup.IsOpen = true, System.Windows.Threading.DispatcherPriority.Input);
+    }
+
+    private void PlaceChord(int bar, int position, string name)
+    {
+        if (_session is null) return;
+        try
+        {
+            var mark = _session.SetChord(bar, position, name);
+            Refresh();
+            _selected = _engraved?.Items.FirstOrDefault(i => i.Lane == LaneKind.Chords && i.Bar == mark.Bar && i.Position == mark.Position);
+            DrawOverlays();
+            Show(ChordLibrary.Find(mark.Name) is null
+                ? $"{mark.Name} written without a diagram: there is none for it in the list."
+                : $"{mark.Name} added. Click it to change it; Delete takes it away.");
+        }
+        catch (Exception ex) when (ex is ArgumentException or InvalidOperationException) { Show(ex.Message.Split(" (Parameter")[0]); }
+    }
+
+    private void DeleteChord(ItemMap chord)
+    {
+        if (_session is null) return;
+        _session.RemoveChord(chord.Bar, chord.Position);
+        _selected = null;
+        Refresh();
+        Show("Chord deleted. Undo brings it back.");
+    }
+
+    private void ChangeChord(ItemMap chord)
+    {
+        if (chord.Page >= _overlays.Count || _score?.Chords?.At(chord.Bar, chord.Position) is not { } mark) return;
+        var b = chord.Bounds;
+        OpenChordPicker(_overlays[chord.Page], new Rect(b.X * Scale, b.Y * Scale, b.Width * Scale, b.Height * Scale), chord.Bar, chord.Position, mark.Name);
     }
 
     private static readonly ControlTemplate PlusTemplate = MakePlusTemplate();
@@ -440,6 +574,13 @@ public partial class MainWindow : Window
 
     private void Overlay_MouseDown(object sender, MouseButtonEventArgs e)
     {
+        SelectAt(sender, e);
+        if (_selected is { Lane: LaneKind.Chords } chord) ChangeChord(chord);
+    }
+
+    /// <summary>Selects what is under the mouse (the smallest thing there), and says what can be done with it.</summary>
+    private void SelectAt(object sender, MouseButtonEventArgs e)
+    {
         if (_engraved is null || sender is not Canvas overlay) return;
         int page = (int)overlay.Tag;
         var at = e.GetPosition(overlay);
@@ -450,19 +591,24 @@ public partial class MainWindow : Window
             ShowOnToolbar(hit);
             Show("A strum: choose a length, Dot, Rest or Accent to change it. Delete takes it away; right-click for more.");
         }
-        else if (_selected is { Lane: LaneKind.Voice } v && _score!.Rhythm is not null)
-            Show(Placeholders.ForRhythm(_score, (v.Bar, v.Position)).Count > 0
-                ? $"Bar {_score.Bars[v.Bar].Number}, {BeatName(v.Position)}: click the + above it to add a strum there."
-                : $"Bar {_score.Bars[v.Bar].Number}, {BeatName(v.Position)}: a strum sounds there already.");
+        else if (_selected is { Lane: LaneKind.Voice } v)
+        {
+            string where = $"Bar {_score!.Bars[v.Bar].Number}, {BeatName(v.Position)}: ";
+            bool strum = Placeholders.ForRhythm(_score, (v.Bar, v.Position)).Count > 0, chord = Placeholders.ForChords(_score, (v.Bar, v.Position)).Count > 0;
+            string noChord = _score.Chords is null ? "" : " (No chord here: one stands within a quarter note of it.)";
+            Show(where + (strum && chord ? "click a + above it to add a strum or a chord there."
+                : strum ? "click the + above it to add a strum there." + noChord
+                : chord ? "a strum sounds there already; the + in the chord row adds a chord."
+                : "a strum sounds there already." + noChord));
+        }
+        else if (_selected is { Lane: LaneKind.Chords }) Show("A chord: pick another from the list to change it; Delete takes it away.");
         DrawOverlays();
     }
 
     private void Overlay_RightClick(object sender, MouseButtonEventArgs e)
     {
-        Overlay_MouseDown(sender, e);
-        if (_selected is not { Lane: LaneKind.Rhythm } strum || _session is null) return;
-        var hit = _score!.Rhythm?.At(strum.Bar, strum.Position);
-        if (hit is null) return;
+        SelectAt(sender, e);
+        if (_session is null) return;
         var menu = new ContextMenu();
         void Add(string header, Action action)
         {
@@ -470,6 +616,18 @@ public partial class MainWindow : Window
             item.Click += (_, _) => action();
             menu.Items.Add(item);
         }
+        if (_selected is { Lane: LaneKind.Chords } chord)
+        {
+            Add("Change the chord…", () => ChangeChord(chord));
+            menu.Items.Add(new Separator());
+            Add("Delete", () => DeleteChord(chord));
+            menu.IsOpen = true;
+            e.Handled = true;
+            return;
+        }
+        if (_selected is not { Lane: LaneKind.Rhythm } strum) return;
+        var hit = _score!.Rhythm?.At(strum.Bar, strum.Position);
+        if (hit is null) return;
         if (!hit.Rest) Add(hit.Accent ? "Take the accent off" : "Accent it", () => { _session.EditStrums(l => l.ToggleAccent(strum.Bar, strum.Position)); Refresh(); });
         Add(hit.Rest ? "Make it a strum" : "Make it a rest", () =>
         {

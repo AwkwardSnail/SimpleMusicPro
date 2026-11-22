@@ -25,7 +25,7 @@ public sealed record ScoreOptions
 }
 
 /// <summary>Which staff of the stack something belongs to.</summary>
-public enum LaneKind { Rhythm, Voice }
+public enum LaneKind { Rhythm, Voice, Chords }
 
 /// <summary>Where a bar was drawn: its page, its place, and where in it each moment that has something at it lies.</summary>
 /// <param name="Bar">The bar's index in the score's list of bars.</param>
@@ -76,6 +76,9 @@ public static class ScoreEngraver
     private const int BottomLineDiatonic = 4 * 7 + 2; // E4: the bottom line of a treble staff
     private const int MiddleLineDiatonic = 34;         // B4
     private const double SlashWidth = 1.1;             // a rhythm slash, in staff spaces
+    // A chord diagram, in staff spaces: the gap between strings, a fret's height, the name's size, the whole row's
+    // height, and where its middle stands from a column's x (over the middle of a notehead or slash).
+    private const double StringGap = 1.0, FretHeight = 1.2, ChordNameSize = 2.0, ChordRowHeight = 11.5, ChordCentre = 0.6;
 
     private static readonly PathStyle Ink = new() { Fill = PdfColor.Black };
 
@@ -95,9 +98,10 @@ public static class ScoreEngraver
         bool rhythm = score.Rhythm is not null, voice = score.ShowVoice || !rhythm;
 
         var lines = Plan(score, voice, ss, right - left, options.JoinEmptyBars);
-        // Vertical layout of a line: the rhythm staff (if any) above the voice staff.
+        // Vertical layout of a line: the chord diagrams (if any) above the rhythm staff (if any) above the voice staff.
+        double chordHeight = score.Chords is not null ? ChordRowHeight * ss : 0;
         double rhythmHeight = rhythm ? 6.5 * ss : 0, voiceHeight = voice ? 11.5 * ss : 0;
-        double lineHeight = 3.5 * ss + rhythmHeight + voiceHeight + 1.5 * ss;
+        double lineHeight = 3.5 * ss + chordHeight + rhythmHeight + voiceHeight + 1.5 * ss;
         double headingHeight = HasHeading(score) ? 64 : 0;
         var pages = new List<List<LinePlan>> { new() };
         double y = options.Margin + headingHeight;
@@ -105,8 +109,9 @@ public static class ScoreEngraver
         {
             if (y + lineHeight > options.PageHeight - options.Margin && pages[^1].Count > 0) { pages.Add([]); y = options.Margin; }
             line.Top = y;
-            line.RhythmBase = y + 3.5 * ss + 4.2 * ss;                         // the middle of the slashes
-            line.StaffTop = y + 3.5 * ss + rhythmHeight + (rhythm ? 2.0 * ss : 0);
+            line.ChordTop = y + 3.5 * ss;
+            line.RhythmBase = y + 3.5 * ss + chordHeight + 4.2 * ss;           // the middle of the slashes
+            line.StaffTop = y + 3.5 * ss + chordHeight + rhythmHeight + (rhythm ? 2.0 * ss : 0);
             pages[^1].Add(line);
             y += lineHeight;
         }
@@ -168,6 +173,7 @@ public static class ScoreEngraver
         public List<List<PlacedItem>> Beams { get; } = [];
         public List<bool> BeamUp { get; } = [];
         public List<List<PlacedHit>> HitBeams { get; } = [];
+        public List<ChordMark> Chords { get; } = [];
         /// <summary>More than 1 for several empty bars in a row, written as one.</summary>
         public int MultiRest = 1;
         public int LastIndex => Index + MultiRest - 1;
@@ -179,7 +185,7 @@ public static class ScoreEngraver
         public bool ShowTimeSignature;
         public double PrefixWidth;
         public double Scale = 1;
-        public double Top, RhythmBase, StaffTop;
+        public double Top, ChordTop, RhythmBase, StaffTop;
     }
 
     /// <summary>How much room a stretch of time takes after a moment, beyond what is drawn there, in staff spaces.</summary>
@@ -201,14 +207,14 @@ public static class ScoreEngraver
     {
         var all = score.Bars;
         var placed = new List<PlacedBar>();
-        bool Empty(int k) => all[k].IsWholeRest && (score.Rhythm is null || !score.Rhythm.InBar(k).Any());
+        bool Empty(int k) => all[k].IsWholeRest && (score.Rhythm is null || !score.Rhythm.InBar(k).Any()) && (score.Chords is null || !score.Chords.InBar(k).Any());
         for (int k = 0; k < all.Count; k++)
         {
             var m = all[k];
             int run = 1;
             if (join && Empty(k) && !m.Pickup)
                 while (k + run < all.Count && Empty(k + run) && all[k + run].Numerator == m.Numerator && all[k + run].Denominator == m.Denominator && all[k + run].KeySharps == m.KeySharps) run++;
-            if (run < 2) { placed.Add(PlaceBar(m, k, voice, score.Rhythm)); continue; }
+            if (run < 2) { placed.Add(PlaceBar(m, k, voice, score.Rhythm, score.Chords)); continue; }
             placed.Add(new PlacedBar { Measure = m, Index = k, MultiRest = run, FixedWidth = 10, StretchWidth = 0 });
             k += run - 1;
         }
@@ -252,7 +258,7 @@ public static class ScoreEngraver
     private static int NominalLength(Measure m) => m.Numerator * 16 / m.Denominator;
 
     /// <summary>Places a bar: what each staff has in it, and one column for each moment something starts in any staff.</summary>
-    private static PlacedBar PlaceBar(Measure measure, int index, bool voice, RhythmLane? rhythm)
+    private static PlacedBar PlaceBar(Measure measure, int index, bool voice, RhythmLane? rhythm, ChordLane? chords)
     {
         var bar = new PlacedBar { Measure = measure, Index = index };
         double head = Bravura.Get("noteheadBlack").Advance;
@@ -337,8 +343,13 @@ public static class ScoreEngraver
                 .Concat(bar.Hits.Select(h => h.Position + h.Length)).Where(Free);
             positions = positions.Concat(open).Distinct().Order().ToList();
         }
+        // A chord stands over a moment of its own (drawn centred over the notes there).
+        if (chords is not null)
+            foreach (var mark in chords.InBar(index).Where(m => m.Position < measure.Length)) bar.Chords.Add(mark);
+        positions = positions.Concat(bar.Chords.Select(c => c.Position)).Distinct().Order().ToList();
         if (positions.Count == 0) positions.Add(0);
         double fixedX = 1.0, stretchX = 0;
+        double? chordRight = null;   // where the last chord's diagram (or name) ends, with a little room
         for (int c = 0; c < positions.Count; c++)
         {
             int pos = positions[c];
@@ -347,6 +358,14 @@ public static class ScoreEngraver
                 .Concat(bar.Hits.Where(h => h.Position == pos).Select(h => h.Rest ? Bravura.Get(RestGlyph(h.Value)).Advance : SlashWidth + (h.Dotted ? 0.7 : 0)))
                 .DefaultIfEmpty(0).Max();
             double colFixed = fixedX + pre;
+            if (bar.Chords.FirstOrDefault(m => m.Position == pos) is { } chord)
+            {
+                // Diagrams never touch: the bar is made wider where they stand close together.
+                var (leftSide, rightSide) = ChordExtent(chord.Name);
+                double leftEdge = colFixed + ChordCentre - leftSide, limit = chordRight ?? 0.4;
+                if (leftEdge < limit) colFixed += limit - leftEdge;
+                chordRight = colFixed + ChordCentre + rightSide + 0.8;
+            }
             bar.Columns.Add((pos, colFixed, stretchX));
             fixedX = colFixed + body;
             int next = c + 1 < positions.Count ? positions[c + 1] : measure.Length;
@@ -362,6 +381,7 @@ public static class ScoreEngraver
             var col = bar.Columns.First(c => c.Position == h.Position);
             (h.Fixed, h.Stretch) = (col.Fixed, col.Stretch);
         }
+        fixedX = Math.Max(fixedX, (chordRight ?? 0) - 0.6);
         bar.FixedWidth = fixedX + 0.6;
         bar.StretchWidth = stretchX;
         BeamNotes(bar);
@@ -392,7 +412,17 @@ public static class ScoreEngraver
             foreach (var i in g) { i.StemUp = up; i.Beamed = true; }
         }
 
-        // Strums are not beamed: each eighth keeps its own flag, whatever the melody's notes do.
+        // Eighth strums that follow one another within a beat are beamed together (two to a quarter-note beat),
+        // by their own timing, whatever the melody's notes do.
+        List<PlacedHit>? run = null;
+        foreach (var h in bar.Hits)
+        {
+            if (h.Rest || h.Flags == 0 || h.TiedToNext) { run = null; continue; }
+            if (run is null || h.Position / beat != run[^1].Position / beat || run[^1].Position + run[^1].Length != h.Position) bar.HitBeams.Add(run = []);
+            run.Add(h);
+        }
+        bar.HitBeams.RemoveAll(g => g.Count < 2);
+        foreach (var g in bar.HitBeams) foreach (var h in g) h.Beamed = true;
     }
 
     // ------------------------------------------------------------------ drawing
@@ -453,9 +483,12 @@ public static class ScoreEngraver
             if (firstBar == 0 && score.Rhythm!.Label.Length > 0)
                 canvas.Text(left, line.RhythmBase - 4.6 * ss, score.Rhythm.Label, new TextStyle { Size = (float)(1.8 * ss), Bold = true });
         }
+        bool chords = score.Chords is not null;
+        if (chords) bands.Add(new LaneBand(page, firstBar, lastBar, LaneKind.Chords, line.ChordTop, line.ChordTop + ChordRowHeight * ss));
 
         // The tempo mark stands above everything else on the first line, above the rhythm staff's name when there is one.
-        double markTop = rhythm ? line.RhythmBase - (score.Rhythm!.Label.Length > 0 ? 8.2 : 6.2) * ss : top - 3.2 * ss;
+        double markTop = chords ? line.ChordTop - 1.0 * ss
+            : rhythm ? line.RhythmBase - (score.Rhythm!.Label.Length > 0 ? 8.2 : 6.2) * ss : top - 3.2 * ss;
         if (score.Tempo > 0 && firstBar == 0)
         {
             double tx = left + line.PrefixWidth * ss;
@@ -506,6 +539,12 @@ public static class ScoreEngraver
                 for (int k = 0; k + 1 < b.Hits.Count; k++)
                     if (b.Hits[k].TiedToNext)
                         DrawHitTie(canvas, Xof(b.Hits[k].Fixed, b.Hits[k].Stretch), Xof(b.Hits[k + 1].Fixed, b.Hits[k + 1].Stretch), line.RhythmBase, ss);
+            }
+            foreach (var mark in b.Chords)
+            {
+                var col = b.Columns.First(c => c.Position == mark.Position);
+                var bounds = DrawChord(canvas, mark.Name, Xof(col.Fixed, col.Stretch) + ChordCentre * ss, line.ChordTop, ss);
+                itemMaps.Add(new ItemMap(page, LaneKind.Chords, b.Index, mark.Position, 0, bounds));
             }
             barX += width;
         }
@@ -698,6 +737,78 @@ public static class ScoreEngraver
         double StemX(PlacedHit h) => xOf(h) + SlashWidth * ss - Stem * ss;
         foreach (var h in g) canvas.Line(new PdfPoint(StemX(h) + Stem * ss / 2, baseY - half), new PdfPoint(StemX(h) + Stem * ss / 2, end), Stem * ss);
         BeamBars(canvas, g.Select(h => (StemX(h), h.Flags)).ToList(), _ => end, true, ss);
+    }
+
+    /// <summary>How far a chord's name and diagram reach to the left and right of its middle, in staff spaces (the name's width a close guess).</summary>
+    private static (double Left, double Right) ChordExtent(string name)
+    {
+        double nameHalf = name.Length * 0.6 * ChordNameSize / 2;
+        if (ChordLibrary.Find(name) is not { } shape) return (nameHalf, nameHalf);
+        double half = 2.5 * StringGap + 0.4;
+        return (Math.Max(half, nameHalf), Math.Max(half + (shape.FirstFret > 1 ? 2.1 : 0), nameHalf));
+    }
+
+    /// <summary>
+    /// Draws a chord: its name, and below it the diagram from the list of chords (strings upright, low E at the left,
+    /// the nut or the first fret's number, a dot for each finger, a bar for a finger across strings, o over an open
+    /// string and × over one not played). A name with no shape in the list is written alone. Returns the box it takes.
+    /// </summary>
+    private static PdfRect DrawChord(PageCanvas canvas, string name, double cx, double top, double ss)
+    {
+        var style = new TextStyle { Size = (float)(ChordNameSize * ss), Bold = true };
+        double nameWidth = canvas.MeasureText(name, style);
+        canvas.Text(cx - nameWidth / 2, top + 1.9 * ss, name, style);
+        double leftX = cx - nameWidth / 2, rightX = cx + nameWidth / 2, bottom = top + 2.4 * ss;
+        if (ChordLibrary.Find(name) is { } shape)
+        {
+            double gap = StringGap * ss, w = 5 * gap, x0 = cx - w / 2, gridTop = top + 3.6 * ss, fh = FretHeight * ss, thin = 0.1 * ss;
+            int frets = shape.FretsShown, first = shape.FirstFret;
+            for (int i = 0; i < 6; i++) canvas.Line(new PdfPoint(x0 + i * gap, gridTop), new PdfPoint(x0 + i * gap, gridTop + frets * fh), thin);
+            for (int j = 0; j <= frets; j++) canvas.Line(new PdfPoint(x0 - thin / 2, gridTop + j * fh), new PdfPoint(x0 + w + thin / 2, gridTop + j * fh), thin);
+            if (first == 1) canvas.Rectangle(x0 - thin / 2, gridTop - 0.4 * ss, w + thin, 0.4 * ss, PdfColor.Black);
+            else
+            {
+                var fr = new TextStyle { Size = (float)(1.3 * ss) };
+                string label = $"{first}fr";
+                canvas.Text(x0 + w + 0.6 * ss, gridTop + 0.5 * fh + 0.45 * ss, label, fr);
+                rightX = Math.Max(rightX, x0 + w + 0.6 * ss + canvas.MeasureText(label, fr));
+            }
+            double FretY(int f) => gridTop + (f - first + 0.5) * fh;
+            if (shape.Barre is { } barre)
+                canvas.Line(new PdfPoint(x0 + barre.FromString * gap, FretY(barre.Fret)), new PdfPoint(x0 + w, FretY(barre.Fret)), 0.56 * ss);
+            double markY = gridTop - 0.85 * ss;
+            for (int i = 0; i < 6; i++)
+            {
+                double sx = x0 + i * gap;
+                int f = shape.Frets[i];
+                if (f < 0)
+                {
+                    double d = 0.27 * ss;
+                    canvas.Line(new PdfPoint(sx - d, markY - d), new PdfPoint(sx + d, markY + d), thin);
+                    canvas.Line(new PdfPoint(sx - d, markY + d), new PdfPoint(sx + d, markY - d), thin);
+                }
+                else if (f == 0) canvas.Path(Circle(sx, markY, 0.28 * ss), new PathStyle { Stroke = PdfColor.Black, StrokeWidth = thin });
+                else canvas.Path(Circle(sx, FretY(f), 0.36 * ss), Ink);
+            }
+            leftX = Math.Min(leftX, x0 - 0.4 * ss);
+            rightX = Math.Max(rightX, x0 + w + 0.4 * ss);
+            bottom = gridTop + frets * fh;
+        }
+        return new PdfRect(leftX - 0.2 * ss, top, rightX - leftX + 0.4 * ss, bottom - top + 0.4 * ss);
+    }
+
+    private static List<ShapeStep> Circle(double cx, double cy, double r)
+    {
+        double k = 0.5523 * r;
+        return
+        [
+            new('M', new PdfPoint(cx + r, cy)),
+            new('C', new PdfPoint(cx, cy + r), new PdfPoint(cx + r, cy + k), new PdfPoint(cx + k, cy + r)),
+            new('C', new PdfPoint(cx - r, cy), new PdfPoint(cx - k, cy + r), new PdfPoint(cx - r, cy + k)),
+            new('C', new PdfPoint(cx, cy - r), new PdfPoint(cx - r, cy - k), new PdfPoint(cx - k, cy - r)),
+            new('C', new PdfPoint(cx + r, cy), new PdfPoint(cx + k, cy - r), new PdfPoint(cx + r, cy - k)),
+            new('Z', default),
+        ];
     }
 
     private static void DrawHitTie(PageCanvas canvas, double x1, double x2, double baseY, double ss)

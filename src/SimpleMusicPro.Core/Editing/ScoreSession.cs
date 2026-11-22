@@ -22,6 +22,8 @@ public sealed class ScoreProject
     public bool ShowRhythm { get; set; } = true;
     public string RhythmLabel { get; set; } = "";
     public List<RhythmHit> Rhythm { get; set; } = [];
+    public bool ShowChords { get; set; } = true;
+    public List<ChordMark> Chords { get; set; } = [];
 
     private static readonly JsonSerializerOptions Json = new() { WriteIndented = true };
 
@@ -117,12 +119,38 @@ public sealed class ScoreSession
             lane = new RhythmLane { Label = Project.RhythmLabel };
             lane.Restore(Project.Rhythm.Where(h => h.Bar < _bars.Count && h.Position < _bars[h.Bar].Length).OrderBy(h => h.Bar).ThenBy(h => h.Position));
         }
+        ChordLane? chords = null;
+        if (Project.ShowChords)
+        {
+            chords = new ChordLane();
+            chords.Restore(Project.Chords.Where(c => c.Bar < _bars.Count && c.Position < _bars[c.Bar].Length));
+        }
         return new ScoreDocument
         {
             Title = Project.Title, Subtitle = Project.Subtitle, Tempo = Midi.TempoAt(0),
-            Bars = _bars, ShowVoice = Project.ShowVoice, Rhythm = lane,
+            Bars = _bars, ShowVoice = Project.ShowVoice, Rhythm = lane, Chords = chords,
         };
     }
+
+    /// <summary>Writes a chord at a place (in the place of the one there), as one step that can be undone.</summary>
+    public ChordMark SetChord(int bar, int position, string name)
+    {
+        var score = Build();
+        var lane = score.Chords ?? throw new InvalidOperationException("There is no chord row in the stack.");
+        if (score.ChordTooClose(bar, position))
+            throw new ArgumentOutOfRangeException(nameof(position), "Chords stand at least a quarter note apart.");
+        ChordMark mark = null!;
+        Change(p =>
+        {
+            mark = lane.Set(bar, position, name);
+            p.Chords = [.. lane.Marks.OrderBy(m => m.Bar).ThenBy(m => m.Position)];
+        });
+        return mark;
+    }
+
+    /// <summary>Takes away the chord at a place, as one step.</summary>
+    public void RemoveChord(int bar, int position) =>
+        Change(p => p.Chords.RemoveAll(m => m.Bar == bar && m.Position == position));
 
     /// <summary>Makes a change as one step that can be undone.</summary>
     public void Change(Action<ScoreProject> change)

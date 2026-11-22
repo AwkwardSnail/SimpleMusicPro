@@ -21,4 +21,17 @@ public static class Placeholders
         if (position >= score.Bars[s.Bar].Length || lane.At(s.Bar, position) is not null) return [];
         return [new Placeholder(LaneKind.Rhythm, s.Bar, position)];
     }
+
+    /// <summary>
+    /// The "+" of the chord row: at the very moment of the note or strum selected, unless a chord is there already
+    /// or stands closer than a quarter note to it (also across a bar line).
+    /// </summary>
+    /// <param name="selected">The note or strum selected (its bar and place), or null for none.</param>
+    public static IReadOnlyList<Placeholder> ForChords(ScoreDocument score, (int Bar, int Position)? selected)
+    {
+        var lane = score.Chords;
+        if (lane is null || selected is not { } s || s.Bar < 0 || s.Bar >= score.Bars.Count) return [];
+        if (s.Position < 0 || s.Position >= score.Bars[s.Bar].Length || lane.At(s.Bar, s.Position) is not null || score.ChordTooClose(s.Bar, s.Position)) return [];
+        return [new Placeholder(LaneKind.Chords, s.Bar, s.Position)];
+    }
 }
