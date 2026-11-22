@@ -313,9 +313,13 @@ public static class ScoreEngraver
             int beat = measure.Beat;
             foreach (var hit in rhythm.InBar(index))
             {
-                // A strum of a length there is no single symbol for (cut short by a later one) is written as the
-                // lengths that make it up.
-                var parts = Quantizer.Split(hit.Position, Math.Min(hit.Length, measure.Length - hit.Position), measure.Length, beat);
+                // Each strum is one slash of its own length, wherever it starts (not split at the beats, as the
+                // melody's notes are). Only a length there is no single symbol for (a strum cut short by a later one)
+                // is written as the lengths that make it up, tied.
+                int length = Math.Min(hit.Length, measure.Length - hit.Position);
+                List<(int Start, int Length)> parts = RhythmLane.Lengths.Contains(length)
+                    ? [(hit.Position, length)]
+                    : Quantizer.Split(hit.Position, length, measure.Length, beat);
                 for (int k = 0; k < parts.Count; k++)
                     bar.Hits.Add(new PlacedHit { Position = parts[k].Start, Length = parts[k].Length, Rest = hit.Rest, Accent = hit.Accent && k == 0, TiedToNext = !hit.Rest && k < parts.Count - 1 });
             }
@@ -388,15 +392,7 @@ public static class ScoreEngraver
             foreach (var i in g) { i.StemUp = up; i.Beamed = true; }
         }
 
-        List<PlacedHit>? run = null;
-        foreach (var h in bar.Hits)
-        {
-            if (h.Rest || h.Flags == 0) { run = null; continue; }
-            if (run is null || h.Position / beat != run[^1].Position / beat || run[^1].Position + run[^1].Length != h.Position) bar.HitBeams.Add(run = []);
-            run.Add(h);
-        }
-        bar.HitBeams.RemoveAll(g => g.Count < 2);
-        foreach (var g in bar.HitBeams) foreach (var h in g) h.Beamed = true;
+        // Strums are not beamed: each eighth keeps its own flag, whatever the melody's notes do.
     }
 
     // ------------------------------------------------------------------ drawing

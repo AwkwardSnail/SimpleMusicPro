@@ -149,6 +149,26 @@ public sealed class ScoreSession
         return added;
     }
 
+    /// <summary>
+    /// Gives the strum sounding at a place a new length (and makes it a strum or a rest, with or without an accent),
+    /// as one step. It keeps its start; a longer one takes the place of what follows it, cut to fit the bar.
+    /// Returns the strum as it now is, or null when there was none.
+    /// </summary>
+    public RhythmHit? ChangeStrum(int bar, int position, int length, bool rest, bool accent)
+    {
+        var score = Build();
+        var lane = score.Rhythm;
+        if (lane?.At(bar, position) is not { } old) return null;
+        RhythmHit changed = null!;
+        Change(p =>
+        {
+            lane.Remove(old.Bar, old.Position);
+            changed = lane.Add(old.Bar, old.Position, length, score.Bars[old.Bar].Length, rest, !rest && accent);
+            p.Rhythm = [.. lane.Hits.OrderBy(h => h.Bar).ThenBy(h => h.Position)];
+        });
+        return changed;
+    }
+
     /// <summary>Changes the strum sounding at a place with a function of the lane (remove it, accent it...), as one step.</summary>
     public void EditStrums(Action<RhythmLane> edit)
     {

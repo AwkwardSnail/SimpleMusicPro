@@ -26,7 +26,6 @@ public partial class MainWindow : Window
     private readonly List<Canvas> _overlays = [];
     private double _zoom = 1.3;               // screen size of a point of the page, before the screen's own scaling
     private ItemMap? _selected;               // the note or strum selected
-    private RhythmHit? _lastAdded;
     private bool _updating;
 
     private static readonly SolidColorBrush Green = new(Color.FromRgb(0x2E, 0x9E, 0x4A));
@@ -66,14 +65,13 @@ public partial class MainWindow : Window
         {
             _session = path.EndsWith(".smpro", StringComparison.OrdinalIgnoreCase) ? ScoreSession.Open(path) : ScoreSession.FromMidi(path);
             _selected = null;
-            _lastAdded = null;
             FillPanel();
             // The page's width fills the preview, at first.
             double room = PreviewScroll.ActualWidth - 2 * 24 - SystemParameters.VerticalScrollBarWidth - 4;
             if (room > 200) _zoom = Math.Clamp(room / (595.28 * 96 / 72), 0.5, 3);
             Refresh();
             Show(_session.ProjectPath is null
-                ? $"Started a score from {System.IO.Path.GetFileName(path)}. Choose a length in the toolbar, then click a + to add a strum."
+                ? $"Started a score from {System.IO.Path.GetFileName(path)}. Click a note in the voice staff, then the + above it to add a strum."
                 : $"Opened {System.IO.Path.GetFileName(path)}.");
         }
         catch (Exception ex) when (ex is IOException or InvalidDataException or UnauthorizedAccessException)
@@ -236,10 +234,58 @@ public partial class MainWindow : Window
         bool dottable = sender is RadioButton { Tag: "4" or "8" };
         DotButton.IsEnabled = dottable;
         if (!dottable) DotButton.IsChecked = false;
-        DrawOverlays();   // the + signs say what they will add
+        ToolbarChanged();
     }
 
-    private void Option_Click(object sender, RoutedEventArgs e) => DrawOverlays();
+    private void Option_Click(object sender, RoutedEventArgs e) => ToolbarChanged();
+
+    /// <summary>A length, Dot, Rest or Accent was chosen: it changes the strum selected, if any; else it is for the next one.</summary>
+    private void ToolbarChanged()
+    {
+        if (_updating) return;
+        if (_selected is { Lane: LaneKind.Rhythm } sel && _session is not null && _score?.Rhythm?.At(sel.Bar, sel.Position) is { } hit)
+        {
+            int length = StrumLength;
+            var changed = _session.ChangeStrum(hit.Bar, hit.Position, length, RestButton.IsChecked == true, AccentButton.IsChecked == true);
+            Refresh();
+            if (changed is null) return;
+            SelectStrum(changed);
+            Show(changed.Length < length
+                ? $"Only a {LengthName(changed.Length)} fits before the end of the bar, so the strum is that long."
+                : $"Changed to {Article(LengthName(changed.Length))} {LengthName(changed.Length)}{(changed.Rest ? " rest" : "")}.");
+        }
+        else DrawOverlays();   // the + sign says what it will add
+    }
+
+    /// <summary>Selects a strum and sets the toolbar to its length, dot, rest and accent, so a click there changes it.</summary>
+    private void SelectStrum(RhythmHit hit)
+    {
+        _selected = _engraved?.Items.Where(i => i.Lane == LaneKind.Rhythm && i.Bar == hit.Bar && hit.Position <= i.Position && i.Position < hit.End)
+                                    .OrderBy(i => i.Position).FirstOrDefault();
+        ShowOnToolbar(hit);
+        DrawOverlays();
+    }
+
+    private void ShowOnToolbar(RhythmHit hit)
+    {
+        (string? tag, bool dot) = hit.Length switch
+        {
+            16 => ("16", false), 12 => ("8", true), 8 => ("8", false), 6 => ("4", true), 4 => ("4", false), 2 => ("2", false), _ => (null, false),
+        };
+        _updating = true;
+        try
+        {
+            if (tag is not null && FindRadio(tag) is { } radio)
+            {
+                radio.IsChecked = true;
+                DotButton.IsEnabled = tag is "4" or "8";
+                DotButton.IsChecked = dot;
+            }
+            RestButton.IsChecked = hit.Rest;
+            AccentButton.IsChecked = hit.Accent;
+        }
+        finally { _updating = false; }
+    }
 
     private void Undo_Click(object sender, RoutedEventArgs e) { _session?.Undo(); AfterHistory(); }
     private void Redo_Click(object sender, RoutedEventArgs e) { _session?.Redo(); AfterHistory(); }
@@ -247,7 +293,6 @@ public partial class MainWindow : Window
     private void AfterHistory()
     {
         _selected = null;
-        _lastAdded = null;
         FillPanel();
         Refresh();
     }
@@ -332,7 +377,7 @@ public partial class MainWindow : Window
         }
 
         (int, int)? note = _selected is { Lane: LaneKind.Voice } v ? (v.Bar, v.Position) : null;
-        foreach (var plus in Placeholders.ForRhythm(_score, note, _lastAdded))
+        foreach (var plus in Placeholders.ForRhythm(_score, note))
         {
             var bar = _engraved.Bars.FirstOrDefault(b => b.Bar == plus.Bar);
             var band = _engraved.Bands.FirstOrDefault(b => b.Lane == LaneKind.Rhythm && b.FirstBar <= plus.Bar && plus.Bar <= b.LastBar);
@@ -371,7 +416,7 @@ public partial class MainWindow : Window
     {
         // A button (drawn as a small ringed +), so it can also be reached with the keyboard and read out.
         string length = LengthName(StrumLength);
-        string what = $"Add {(length.StartsWith('e') ? "an" : "a")} {length}{(RestButton.IsChecked == true ? " rest" : " strum")} here (bar {_score!.Bars[plus.Bar].Number}, {BeatName(plus.Position)})";
+        string what = $"Add {Article(length)} {length}{(RestButton.IsChecked == true ? " rest" : " strum")} here (bar {_score!.Bars[plus.Bar].Number}, {BeatName(plus.Position)})";
         var sign = new Button { Template = PlusTemplate, Width = 18, Height = 18, Cursor = Cursors.Hand, ToolTip = what };
         System.Windows.Automation.AutomationProperties.SetName(sign, what);
         sign.Click += (_, _) => AddStrum(plus);
@@ -384,11 +429,11 @@ public partial class MainWindow : Window
         int length = StrumLength;
         try
         {
-            _lastAdded = _session.AddStrum(plus.Bar, plus.Position, length, RestButton.IsChecked == true, RestButton.IsChecked != true && AccentButton.IsChecked == true);
-            _selected = null;
+            var added = _session.AddStrum(plus.Bar, plus.Position, length, RestButton.IsChecked == true, RestButton.IsChecked != true && AccentButton.IsChecked == true);
             Refresh();
-            if (_lastAdded.Length < length) Show($"Only a {LengthName(_lastAdded.Length)} fits before the end of the bar, so the strum is that long.");
-            else Show("Added. The next + is right after it.");
+            SelectStrum(added);   // selected, so a length chosen now changes it
+            if (added.Length < length) Show($"Only a {LengthName(added.Length)} fits before the end of the bar, so the strum is that long.");
+            else Show("Added. To change it, choose another length, Dot, Rest or Accent while it is selected.");
         }
         catch (ArgumentOutOfRangeException ex) { Show(ex.Message.Split(" (Parameter")[0]); }
     }
@@ -400,10 +445,16 @@ public partial class MainWindow : Window
         var at = e.GetPosition(overlay);
         double x = at.X / Scale, y = at.Y / Scale;
         _selected = _engraved.Items.Where(i => i.Page == page && i.Bounds.Contains(x, y)).OrderBy(i => i.Bounds.Width * i.Bounds.Height).FirstOrDefault();
+        if (_selected is { Lane: LaneKind.Rhythm } s && _score!.Rhythm?.At(s.Bar, s.Position) is { } hit)
+        {
+            ShowOnToolbar(hit);
+            Show("A strum: choose a length, Dot, Rest or Accent to change it. Delete takes it away; right-click for more.");
+        }
+        else if (_selected is { Lane: LaneKind.Voice } v && _score!.Rhythm is not null)
+            Show(Placeholders.ForRhythm(_score, (v.Bar, v.Position)).Count > 0
+                ? $"Bar {_score.Bars[v.Bar].Number}, {BeatName(v.Position)}: click the + above it to add a strum there."
+                : $"Bar {_score.Bars[v.Bar].Number}, {BeatName(v.Position)}: a strum sounds there already.");
         DrawOverlays();
-        if (_selected is { Lane: LaneKind.Voice } v && _score!.Rhythm is not null)
-            Show($"Bar {_score.Bars[v.Bar].Number}, {BeatName(v.Position)}: click the + above it to add a strum there.");
-        else if (_selected is { Lane: LaneKind.Rhythm }) Show("A strum: Delete takes it away; right-click for more.");
     }
 
     private void Overlay_RightClick(object sender, MouseButtonEventArgs e)
@@ -436,7 +487,6 @@ public partial class MainWindow : Window
         if (_session is null) return;
         _session.EditStrums(l => l.Remove(strum.Bar, strum.Position));
         _selected = null;
-        _lastAdded = null;
         Refresh();
         Show("Deleted. Undo brings it back.");
     }
@@ -447,6 +497,8 @@ public partial class MainWindow : Window
     {
         16 => "whole note", 12 => "dotted half", 8 => "half note", 6 => "dotted quarter", 4 => "quarter note", 2 => "eighth note", _ => $"{sixteenths} sixteenths",
     };
+
+    private static string Article(string word) => word.StartsWith('e') ? "an" : "a";
 
     private static string BeatName(int position) =>
         position % 4 == 0 ? $"beat {position / 4 + 1}" : $"after beat {position / 4 + 1}";

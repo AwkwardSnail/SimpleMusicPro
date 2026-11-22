@@ -66,9 +66,9 @@
                         <ComboBox x:Name="TrackBox" Margin="24,2,0,16" SelectionChanged="Track_Changed" />
 
                         <TextBlock TextWrapping="Wrap" Foreground="{StaticResource GreenDimBrush}" Margin="0,8,0,0">
-                            To add strums, choose a length in the toolbar, then click a + sign in the rhythm staff.
-                            Click a note in the voice staff to get a + above it. After each strum the next + comes
-                            right after it. Right-click a strum to change it or delete it.
+                            To add a strum, click a note in the voice staff: a + appears above it. Choose a length
+                            in the toolbar, then click the +. Click a strum to select it; a length, Dot, Rest or
+                            Accent chosen then changes it. Right-click a strum for more, or press Delete.
                         </TextBlock>
                     </StackPanel>
                 </ScrollViewer>
