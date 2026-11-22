@@ -218,9 +218,9 @@ public partial class MainWindow : Window
         get
         {
             int length = 4;
-            foreach (var b in new[] { "16", "8", "4", "2" })
+            foreach (var b in new[] { "16", "8", "4", "2", "1" })
                 if (FindRadio(b) is { IsChecked: true }) length = int.Parse(b);
-            if (DotButton.IsChecked == true && length is 4 or 8) length = length * 3 / 2;
+            if (DotButton.IsChecked == true && length is 2 or 4 or 8) length = length * 3 / 2;
             return length;
         }
     }
@@ -231,8 +231,8 @@ public partial class MainWindow : Window
     private void Length_Checked(object sender, RoutedEventArgs e)
     {
         if (DotButton is null) return; // still loading
-        // A dot only goes with a quarter or a half: a dotted eighth would need a sixteenth, a dotted whole would not fit.
-        bool dottable = sender is RadioButton { Tag: "4" or "8" };
+        // A dot goes with an eighth, a quarter or a half: a dotted sixteenth would need a thirty-second, a dotted whole would not fit.
+        bool dottable = sender is RadioButton { Tag: "2" or "4" or "8" };
         DotButton.IsEnabled = dottable;
         if (!dottable) DotButton.IsChecked = false;
         ToolbarChanged();
@@ -271,7 +271,7 @@ public partial class MainWindow : Window
     {
         (string? tag, bool dot) = hit.Length switch
         {
-            16 => ("16", false), 12 => ("8", true), 8 => ("8", false), 6 => ("4", true), 4 => ("4", false), 2 => ("2", false), _ => (null, false),
+            16 => ("16", false), 12 => ("8", true), 8 => ("8", false), 6 => ("4", true), 4 => ("4", false), 3 => ("2", true), 2 => ("2", false), 1 => ("1", false), _ => (null, false),
         };
         _updating = true;
         try
@@ -279,7 +279,7 @@ public partial class MainWindow : Window
             if (tag is not null && FindRadio(tag) is { } radio)
             {
                 radio.IsChecked = true;
-                DotButton.IsEnabled = tag is "4" or "8";
+                DotButton.IsEnabled = tag is "2" or "4" or "8";
                 DotButton.IsChecked = dot;
             }
             RestButton.IsChecked = hit.Rest;
@@ -653,7 +653,7 @@ public partial class MainWindow : Window
 
     private static string LengthName(int sixteenths) => sixteenths switch
     {
-        16 => "whole note", 12 => "dotted half", 8 => "half note", 6 => "dotted quarter", 4 => "quarter note", 2 => "eighth note", _ => $"{sixteenths} sixteenths",
+        16 => "whole note", 12 => "dotted half", 8 => "half note", 6 => "dotted quarter", 4 => "quarter note", 3 => "dotted eighth", 2 => "eighth note", 1 => "sixteenth note", _ => $"{sixteenths} sixteenths",
     };
 
     private static string Article(string word) => word.StartsWith('e') ? "an" : "a";

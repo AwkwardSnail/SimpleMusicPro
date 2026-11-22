@@ -13,13 +13,26 @@ public class EditingTests
     }
 
     [Fact]
-    public void Strums_are_eighth_notes_or_longer_and_start_on_the_eighth_note_grid()
+    public void Strums_are_sixteenth_notes_or_longer_and_start_on_any_sixteenth()
     {
         var lane = new RhythmLane();
-        Assert.Throws<ArgumentOutOfRangeException>(() => lane.Add(0, 0, 1, 16));   // a sixteenth: not for now
-        Assert.Throws<ArgumentOutOfRangeException>(() => lane.Add(0, 3, 2, 16));   // off the grid
-        Assert.Throws<ArgumentOutOfRangeException>(() => lane.Add(0, 0, 3, 16));   // a dotted eighth: needs a sixteenth after it
-        Assert.Equal(6, lane.Add(0, 0, 6, 16).Length);                             // a dotted quarter is fine
+        Assert.Throws<ArgumentOutOfRangeException>(() => lane.Add(0, 0, 5, 16));   // no single symbol for five sixteenths
+        Assert.Throws<ArgumentOutOfRangeException>(() => lane.Add(0, 16, 1, 16));  // outside the bar
+        Assert.Equal(3, lane.Add(0, 0, 3, 16).Length);                             // a dotted eighth
+        Assert.Equal(1, lane.Add(0, 3, 1, 16).Length);                             // and a sixteenth off the beat
+        Assert.Equal(6, lane.Add(0, 4, 6, 16).Length);                             // a dotted quarter
+    }
+
+    [Fact]
+    public void Sixteenth_strums_in_a_beat_share_a_beam()
+    {
+        var score = TwoBars();
+        for (int p = 0; p < 4; p++) score.Rhythm!.Add(0, p, 1, 16);   // four sixteenths on beat 1
+        score.Rhythm!.Add(0, 4, 3, 16);                               // a dotted eighth and a sixteenth on beat 2
+        score.Rhythm.Add(0, 7, 1, 16);
+        score.Rhythm.Add(0, 9, 1, 16);                                // a lone sixteenth after a gap
+        using var engraved = ScoreEngraver.Engrave(score, new ScoreOptions());
+        Assert.Equal(7, engraved.Items.Count(i => i.Lane == LaneKind.Rhythm && i.Bar == 0));
     }
 
     [Fact]
@@ -32,12 +45,12 @@ public class EditingTests
     }
 
     [Fact]
-    public void A_selected_note_offers_one_plus_at_its_moment_rounded_to_the_eighth()
+    public void A_selected_note_offers_one_plus_at_its_very_moment()
     {
         var score = TwoBars();
         score.Rhythm!.Add(1, 0, 8, 16);                   // a half on beats 1 and 2
         var plus = Placeholders.ForRhythm(score, (1, 11));
-        Assert.Equal([(LaneKind.Rhythm, 1, 10)], plus.Select(p => (p.Lane, p.Bar, p.Position)).ToArray());
+        Assert.Equal([(LaneKind.Rhythm, 1, 11)], plus.Select(p => (p.Lane, p.Bar, p.Position)).ToArray());
         Assert.Empty(Placeholders.ForRhythm(score, (1, 3)));   // a strum sounds there already
     }
 

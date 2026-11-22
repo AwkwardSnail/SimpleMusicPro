@@ -412,7 +412,7 @@ public static class ScoreEngraver
             foreach (var i in g) { i.StemUp = up; i.Beamed = true; }
         }
 
-        // Eighth strums that follow one another within a beat are beamed together (two to a quarter-note beat),
+        // Eighth and sixteenth strums that follow one another within a beat are beamed together,
         // by their own timing, whatever the melody's notes do.
         List<PlacedHit>? run = null;
         foreach (var h in bar.Hits)

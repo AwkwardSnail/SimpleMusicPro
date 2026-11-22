@@ -15,11 +15,11 @@ public sealed record RhythmHit(int Bar, int Position, int Length, bool Rest = fa
 /// </summary>
 public sealed class RhythmLane
 {
-    /// <summary>The shortest strum, in sixteenths: an eighth note, for now. Strums start on an eighth-note grid.</summary>
-    public const int Shortest = 2;
+    /// <summary>The shortest strum, in sixteenths: a sixteenth note. Strums start on the sixteenth-note grid.</summary>
+    public const int Shortest = 1;
 
-    /// <summary>The lengths a strum can be, in sixteenths: an eighth, a quarter, a dotted quarter, a half, a dotted half, a whole.</summary>
-    public static readonly IReadOnlyList<int> Lengths = [2, 4, 6, 8, 12, 16];
+    /// <summary>The lengths a strum can be, in sixteenths: a sixteenth, an eighth, a dotted eighth, a quarter, a dotted quarter, a half, a dotted half, a whole.</summary>
+    public static readonly IReadOnlyList<int> Lengths = [1, 2, 3, 4, 6, 8, 12, 16];
 
     private readonly List<RhythmHit> _hits = [];
 
@@ -41,8 +41,7 @@ public sealed class RhythmLane
     public RhythmHit Add(int bar, int position, int length, int barLength, bool rest = false, bool accent = false)
     {
         if (position < 0 || position >= barLength) throw new ArgumentOutOfRangeException(nameof(position), "The place must be inside the bar.");
-        if (position % Shortest != 0) throw new ArgumentOutOfRangeException(nameof(position), "A strum starts on an eighth note.");
-        if (!Lengths.Contains(length)) throw new ArgumentOutOfRangeException(nameof(length), "A strum is an eighth, a quarter, a half or a whole note, or a dotted quarter or half.");
+        if (!Lengths.Contains(length)) throw new ArgumentOutOfRangeException(nameof(length), "A strum is a sixteenth, an eighth, a quarter, a half or a whole note, or a dotted eighth, quarter or half.");
         length = Math.Min(length, barLength - position);
         int end = position + length;
         for (int i = _hits.Count - 1; i >= 0; i--)

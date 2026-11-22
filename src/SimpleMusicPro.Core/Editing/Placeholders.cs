@@ -8,7 +8,7 @@ public sealed record Placeholder(LaneKind Lane, int Bar, int Position);
 
 /// <summary>
 /// Where the "+" signs go, that add a strum with a click: only at the moment of the note (or rest) selected in
-/// the voice staff, rounded to the eighth-note grid, and never where a strum already sounds.
+/// the voice staff, and never where a strum already sounds.
 /// </summary>
 public static class Placeholders
 {
@@ -17,8 +17,8 @@ public static class Placeholders
     {
         var lane = score.Rhythm;
         if (lane is null || selected is not { } s || s.Bar < 0 || s.Bar >= score.Bars.Count) return [];
-        int position = s.Position - s.Position % RhythmLane.Shortest;   // strums stand on the eighth-note grid
-        if (position >= score.Bars[s.Bar].Length || lane.At(s.Bar, position) is not null) return [];
+        int position = s.Position;   // the sixteenth-note grid: any note's moment
+        if (position < 0 || position >= score.Bars[s.Bar].Length || lane.At(s.Bar, position) is not null) return [];
         return [new Placeholder(LaneKind.Rhythm, s.Bar, position)];
     }
 

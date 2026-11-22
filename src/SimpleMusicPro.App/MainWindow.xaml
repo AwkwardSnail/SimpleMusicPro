@@ -30,8 +30,9 @@
                 <RadioButton Style="{StaticResource ToolRadio}" GroupName="Length" Tag="16" Content="Whole" Checked="Length_Checked" ToolTip="A strum that lasts the whole bar" />
                 <RadioButton Style="{StaticResource ToolRadio}" GroupName="Length" Tag="8" Content="Half" Checked="Length_Checked" ToolTip="A strum of a half note" />
                 <RadioButton x:Name="QuarterButton" Style="{StaticResource ToolRadio}" GroupName="Length" Tag="4" Content="Quarter" IsChecked="True" Checked="Length_Checked" ToolTip="A strum of a quarter note" />
-                <RadioButton x:Name="EighthButton" Style="{StaticResource ToolRadio}" GroupName="Length" Tag="2" Content="Eighth" Checked="Length_Checked" ToolTip="A strum of an eighth note, the shortest for now" />
-                <ToggleButton x:Name="DotButton" Content="Dot" Checked="Option_Click" Unchecked="Option_Click" ToolTip="Dotted: half as long again (for a quarter or a half)" />
+                <RadioButton x:Name="EighthButton" Style="{StaticResource ToolRadio}" GroupName="Length" Tag="2" Content="Eighth" Checked="Length_Checked" ToolTip="A strum of an eighth note" />
+                <RadioButton Style="{StaticResource ToolRadio}" GroupName="Length" Tag="1" Content="Sixteenth" Checked="Length_Checked" ToolTip="A strum of a sixteenth note, the shortest" />
+                <ToggleButton x:Name="DotButton" Content="Dot" Checked="Option_Click" Unchecked="Option_Click" ToolTip="Dotted: half as long again (for an eighth, a quarter or a half)" />
                 <ToggleButton x:Name="RestButton" Content="Rest" Checked="Option_Click" Unchecked="Option_Click" ToolTip="Add a rest instead of a strum" />
                 <ToggleButton x:Name="AccentButton" Content="Accent" Checked="Option_Click" Unchecked="Option_Click" ToolTip="Add the strum with an accent (&gt;)" />
             </WrapPanel>
