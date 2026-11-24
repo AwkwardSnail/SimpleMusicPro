@@ -24,12 +24,13 @@ public readonly record struct Pitch(int Step, int Alter, int Octave)
     /// as sharps in a key with sharps (or none) and as flats in a key with flats.
     /// </summary>
     /// <param name="keySharps">-7 (seven flats) to 7 (seven sharps).</param>
-    public static Pitch FromMidi(int midi, int keySharps)
+    /// <param name="flats">For a note outside the key: true to spell it as a flat, false as a sharp, null as the key would.</param>
+    public static Pitch FromMidi(int midi, int keySharps, bool? flats = null)
     {
         int octave = midi / 12 - 1, pc = midi % 12;
         // The notes of the major scale of the key, spelled: each letter gets the sharp or flat the key puts on it.
         var inKey = KeyAlter(keySharps);
-        var spelled = keySharps < 0 ? Flats[pc] : Sharps[pc];
+        var spelled = (flats ?? keySharps < 0) ? Flats[pc] : Sharps[pc];
         // A note of the key's scale is spelled with the key's own letter, for example F# in G major, or Bb in F major.
         for (int step = 0; step < 7; step++)
             if (((Semitones[step] + inKey[step]) % 12 + 12) % 12 == pc) { spelled = (step, inKey[step]); break; }
@@ -68,6 +69,16 @@ public sealed record NotatedItem(int Start, int Length, IReadOnlyList<Pitch> Pit
     public bool Dotted => Length is 3 or 6 or 12;
     /// <summary>The length of the plain note value, without its dot, in sixteenths.</summary>
     public int Value => Dotted ? Length * 2 / 3 : Length;
+}
+
+/// <summary>
+/// A note (or a chord: several keys at once) of the melody as entered by hand: where it starts, in sixteenths from
+/// the start of the piece, how long it lasts, its MIDI keys, and whether a note outside the key is spelled as a
+/// flat rather than a sharp.
+/// </summary>
+public sealed record MelodyNote(long Start, int Length, IReadOnlyList<int> Pitches, bool Flats = false)
+{
+    public long End => Start + Length;
 }
 
 /// <summary>One bar of a staff.</summary>

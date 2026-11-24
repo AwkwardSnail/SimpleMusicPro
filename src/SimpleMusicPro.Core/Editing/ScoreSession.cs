@@ -26,6 +26,8 @@ public sealed class ScoreProject
     public List<ChordMark> Chords { get; set; } = [];
     public bool ShowLyrics { get; set; } = true;
     public List<LyricMark> Lyrics { get; set; } = [];
+    /// <summary>The melody as changed by hand, in the place of the voice track's notes; null while it is the MIDI file's.</summary>
+    public List<MelodyNote>? Melody { get; set; }
 
     private static readonly JsonSerializerOptions Json = new() { WriteIndented = true };
 
@@ -116,29 +118,31 @@ public sealed class ScoreSession
     public ScoreDocument Build()
     {
         if (Midi is null || Midi.Tracks.Count == 0) return new ScoreDocument();
-        _bars = Bars();
+        var frame = Bars();
+        // The bars (their places, time and key signatures) are the MIDI file's; the notes are the hand-made melody's, once there is one.
+        var bars = Project.Melody is null ? frame : Quantizer.Rewrite(frame, Project.Melody);
         RhythmLane? lane = null;
         if (Project.ShowRhythm)
         {
             lane = new RhythmLane { Label = Project.RhythmLabel };
-            lane.Restore(Project.Rhythm.Where(h => h.Bar < _bars.Count && h.Position < _bars[h.Bar].Length).OrderBy(h => h.Bar).ThenBy(h => h.Position));
+            lane.Restore(Project.Rhythm.Where(h => h.Bar < bars.Count && h.Position < bars[h.Bar].Length).OrderBy(h => h.Bar).ThenBy(h => h.Position));
         }
         ChordLane? chords = null;
         if (Project.ShowChords)
         {
             chords = new ChordLane();
-            chords.Restore(Project.Chords.Where(c => c.Bar < _bars.Count && c.Position < _bars[c.Bar].Length));
+            chords.Restore(Project.Chords.Where(c => c.Bar < bars.Count && c.Position < bars[c.Bar].Length));
         }
         LyricLane? lyrics = null;
         if (Project.ShowLyrics)
         {
             lyrics = new LyricLane();
-            lyrics.Restore(Project.Lyrics.Where(l => l.Bar < _bars.Count && l.Position < _bars[l.Bar].Length));
+            lyrics.Restore(Project.Lyrics.Where(l => l.Bar < bars.Count && l.Position < bars[l.Bar].Length));
         }
         return new ScoreDocument
         {
             Title = Project.Title, Subtitle = Project.Subtitle, Tempo = Midi.TempoAt(0),
-            Bars = _bars, ShowVoice = Project.ShowVoice, Rhythm = lane, Chords = chords, Lyrics = lyrics,
+            Bars = bars, ShowVoice = Project.ShowVoice, Rhythm = lane, Chords = chords, Lyrics = lyrics,
         };
     }
 
@@ -158,10 +162,92 @@ public sealed class ScoreSession
     public int TakeLyricsFromMidi()
     {
         if (Midi is null) return 0;
-        var marks = LyricImport.FromMidi(Midi, Bars());
+        var marks = LyricImport.FromMidi(Midi, Build().Bars);
         Change(p => p.Lyrics = marks);
         return marks.Count;
     }
+
+    // ------------------------------------------------------------------ the melody
+
+    /// <summary>Whether the melody has been changed by hand (it is no longer the voice track's notes as they are).</summary>
+    public bool MelodyChanged => Project.Melody is not null;
+
+    /// <summary>The melody's notes as they now are: the hand-made ones, or the voice track's.</summary>
+    public IReadOnlyList<MelodyNote> Melody()
+    {
+        if (Project.Melody is not null) return Project.Melody;
+        if (Midi is null || Midi.Tracks.Count == 0) return [];
+        return Quantizer.Notes(Midi, Midi.Tracks[Math.Clamp(Project.VoiceTrack, 0, Midi.Tracks.Count - 1)]);
+    }
+
+    /// <summary>Where a place of a bar is, in sixteenths from the start of the piece, and where its bar ends.</summary>
+    private (long Moment, long BarEnd) Place(int bar, int position)
+    {
+        var bars = Bars();
+        if (bar < 0 || bar >= bars.Count || position < 0 || position >= bars[bar].Length)
+            throw new ArgumentOutOfRangeException(nameof(position), "The place must be inside the bar.");
+        return (bars[bar].Start + position, bars[bar].Start + bars[bar].Length);
+    }
+
+    /// <summary>Changes the melody as one step; the first change makes the voice track's notes the score's own.</summary>
+    private T EditMelody<T>(Func<List<MelodyNote>, T> edit)
+    {
+        T result = default!;
+        var notes = Melody().ToList();
+        Change(p =>
+        {
+            result = edit(notes);
+            p.Melody = [.. notes.OrderBy(n => n.Start)];
+        });
+        return result;
+    }
+
+    /// <summary>The note sounding at a place, or null for a rest.</summary>
+    public MelodyNote? NoteAt(int bar, int position) => MelodyEdit.At(Melody(), Place(bar, position).Moment);
+
+    /// <summary>Adds a note at a place, cut to fit the bar, in the place of what sounds there; one step.</summary>
+    public MelodyNote AddNote(int bar, int position, int length, int pitch, bool flats)
+    {
+        var (moment, end) = Place(bar, position);
+        return EditMelody(n => MelodyEdit.Add(n, moment, length, pitch, flats, end));
+    }
+
+    /// <summary>Puts a rest of a length at a place (shortening or taking away the notes there); one step.</summary>
+    public void AddRest(int bar, int position, int length)
+    {
+        var (moment, end) = Place(bar, position);
+        EditMelody(n => { MelodyEdit.Clear(n, moment, (int)Math.Min(length, end - moment)); return 0; });
+    }
+
+    /// <summary>Takes away the note sounding at a place (a rest takes its place); one step.</summary>
+    public void RemoveNote(int bar, int position)
+    {
+        if (NoteAt(bar, position) is not { } note) return;
+        EditMelody(n => n.RemoveAll(x => x.Start == note.Start));
+    }
+
+    /// <summary>Gives the note sounding at a place another length, cut to fit its bar; one step. Returns it, or null for none.</summary>
+    public MelodyNote? SetNoteLength(int bar, int position, int length)
+    {
+        if (NoteAt(bar, position) is not { } note) return null;
+        long end = Bars().Where(m => m.Start <= note.Start).Select(m => m.Start + m.Length).DefaultIfEmpty(note.End).Last();
+        return EditMelody(n => MelodyEdit.SetLength(n, note.Start, length, end));
+    }
+
+    /// <summary>Gives the note sounding at a place another pitch (and spelling); one step. Returns it, or null for none.</summary>
+    public MelodyNote? SetNotePitch(int bar, int position, int pitch, bool flats)
+    {
+        if (NoteAt(bar, position) is not { } note) return null;
+        return EditMelody(n =>
+        {
+            int i = n.FindIndex(x => x.Start == note.Start);
+            n[i] = note with { Pitches = [Math.Clamp(pitch, 0, 127)], Flats = flats };
+            return n[i];
+        });
+    }
+
+    /// <summary>Goes back to the voice track's notes, as they are in the MIDI file; one step.</summary>
+    public void TakeNotesFromMidi() => Change(p => p.Melody = null);
 
     /// <summary>Writes a syllable at a place (empty text takes it away), as one step. Returns it, or null when taken away.</summary>
     public LyricMark? SetLyric(int bar, int position, string text, bool hyphen)

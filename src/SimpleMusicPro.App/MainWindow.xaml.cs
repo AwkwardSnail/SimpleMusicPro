@@ -220,7 +220,16 @@ public partial class MainWindow : Window
         if (_updating || _session is null || TrackBox.SelectedIndex < 0) return;
         int track = TrackBox.SelectedIndex;
         if (track == _session.Project.VoiceTrack) return;
-        _session.Change(p => p.VoiceTrack = track);
+        // Notes changed by hand belong to the track they were made from: another track's notes take their place.
+        if (_session.MelodyChanged && MessageBox.Show(this, "The notes changed by hand will be replaced by the notes of the track chosen. Undo brings them back. Go on?",
+                "SimpleMusic Pro", MessageBoxButton.OKCancel, MessageBoxImage.Question) != MessageBoxResult.OK)
+        {
+            _updating = true;
+            TrackBox.SelectedIndex = _session.Project.VoiceTrack;
+            _updating = false;
+            return;
+        }
+        _session.Change(p => { p.VoiceTrack = track; p.Melody = null; });
         _selected = null;
         Refresh();
     }
@@ -254,6 +263,73 @@ public partial class MainWindow : Window
     }
 
     private void Option_Click(object sender, RoutedEventArgs e) => ToolbarChanged();
+
+    /// <summary>
+    /// ♯, ♭ or ♮: on the note selected, it is put on that note at once; with none selected, it is kept for the next
+    /// notes added (one of the three at a time).
+    /// </summary>
+    private void Accidental_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is not ToggleButton button) return;
+        int alter = int.Parse((string)button.Tag);
+        if (_selected is { Lane: LaneKind.Voice } sel && _session is not null && _score is not null && _session.NoteAt(sel.Bar, sel.Position) is { } note)
+        {
+            button.IsChecked = false;
+            int key = _score.Bars[sel.Bar].KeySharps;
+            var (midi, flats) = MelodyEdit.WithAccidental(note.Pitches[0], alter, key, note.Flats);
+            _session.SetNotePitch(sel.Bar, sel.Position, midi, flats);
+            AfterNoteEdit(sel, $"Now {Pitch.FromMidi(midi, key, flats ? true : null).Name}.");
+            return;
+        }
+        foreach (var other in new[] { SharpButton, FlatButton, NaturalButton })
+            if (other != button) other.IsChecked = false;
+        PlaceNoteDots();
+    }
+
+    private void StepNote(ItemMap sel, int steps)
+    {
+        if (_session?.NoteAt(sel.Bar, sel.Position) is not { } note || _score is null) return;
+        int key = _score.Bars[sel.Bar].KeySharps;
+        int midi = MelodyEdit.StepBy(note.Pitches[0], steps, key, note.Flats);
+        if (midi is < 0 or > 127) return;
+        _session.SetNotePitch(sel.Bar, sel.Position, midi, false);
+        AfterNoteEdit(sel, $"Now {Pitch.FromMidi(midi, key).Name}.");
+    }
+
+    private void DeleteNote(ItemMap sel)
+    {
+        if (_session is null) return;
+        _session.RemoveNote(sel.Bar, sel.Position);
+        _selected = null;
+        Refresh();
+        Show("Note deleted: a rest takes its place. Undo brings it back.");
+    }
+
+    private void SetNoteLength(ItemMap sel, int length)
+    {
+        if (_session?.SetNoteLength(sel.Bar, sel.Position, length) is not { } note) return;
+        AfterNoteEdit(sel, note.Length < length ? $"Only {Article(LengthName(note.Length))} {LengthName(note.Length)} fits before the end of the bar." : $"Now {Article(LengthName(note.Length))} {LengthName(note.Length)}.");
+    }
+
+    /// <summary>Draws the score again after a change to a note, keeping it selected.</summary>
+    private void AfterNoteEdit(ItemMap sel, string message)
+    {
+        Refresh();
+        _selected = _engraved?.Items.Where(i => i.Lane == LaneKind.Voice && i.Bar == sel.Bar && i.Position <= sel.Position).OrderBy(i => i.Position).LastOrDefault();
+        DrawOverlays();
+        Show(message);
+    }
+
+    private void TakeNotes_Click(object sender, RoutedEventArgs e)
+    {
+        if (_session is not { MelodyChanged: true }) return;
+        if (MessageBox.Show(this, "Put back the voice track's notes as they are in the MIDI file, in the place of the notes changed by hand? Undo brings these back.",
+                "SimpleMusic Pro", MessageBoxButton.OKCancel, MessageBoxImage.Question) != MessageBoxResult.OK) return;
+        _session.TakeNotesFromMidi();
+        _selected = null;
+        Refresh();
+        Show("The notes are the MIDI file's again.");
+    }
 
     private void Auto_Click(object sender, RoutedEventArgs e)
     {
@@ -333,6 +409,8 @@ public partial class MainWindow : Window
         else if (e.Key == Key.Delete && _selected is { Lane: LaneKind.Rhythm } strum) { DeleteStrum(strum); e.Handled = true; }
         else if (e.Key == Key.Delete && _selected is { Lane: LaneKind.Chords } chord) { DeleteChord(chord); e.Handled = true; }
         else if (e.Key == Key.Delete && _selected is { Lane: LaneKind.Lyrics } word) { DeleteLyric(word); e.Handled = true; }
+        else if (e.Key == Key.Delete && _selected is { Lane: LaneKind.Voice } gone) { DeleteNote(gone); e.Handled = true; }
+        else if (e.Key is Key.Up or Key.Down && _selected is { Lane: LaneKind.Voice } moved) { StepNote(moved, e.Key == Key.Up ? 1 : -1); e.Handled = true; }
     }
 
     private void Preview_MouseWheel(object sender, MouseWheelEventArgs e)
@@ -353,6 +431,7 @@ public partial class MainWindow : Window
         UpdateTitle();
         UndoButton.IsEnabled = _session?.CanUndo == true;
         RedoButton.IsEnabled = _session?.CanRedo == true;
+        TakeNotesButton.Visibility = _session?.MelodyChanged == true ? Visibility.Visible : Visibility.Collapsed;
         _engraved?.Dispose();
         _engraved = null;
         Pages.Children.Clear();
@@ -417,7 +496,7 @@ public partial class MainWindow : Window
             var measure = _score.Bars[plus.Bar];
             int level = LevelOf(plus.Bar, plus.Position);
             bool auto = AutoButton.IsChecked == true;
-            int length = auto ? AutoLength(lane, plus.Bar, plus.Position, level, Math.Max(1, measure.Beat), measure.Length) : StrumLength;
+            int length = auto ? AutoLength(plus.Position, level, Math.Max(1, measure.Beat), measure.Length, lane.InBar(plus.Bar).Select(h => h.Position)) : StrumLength;
             var p = plus;
             AddShape(_overlays[bar.Page], (bar.XOf(plus.Position) + 0.55 * 5.6) * Scale, (band.Bottom - 2.2 * 5.6) * Scale, level,
                 auto ? StrumWhat(plus, length) : StrumWhat(plus), () => { if (auto) AddStrum(p, length); else AddStrum(p); });
@@ -479,29 +558,83 @@ public partial class MainWindow : Window
 
     // ------------------------------------------------------------------ the places of a bar under the mouse
 
-    private int _hoverPage = -1, _hoverBar = -1;   // the bar of the rhythm staff under the mouse, or -1
+    private int _hoverPage = -1, _hoverBar = -1;   // the bar under the mouse (of the rhythm or the voice staff), or -1
+    private LaneKind _hoverLane = LaneKind.Rhythm; // which staff that bar is in
     private int _hoverBeat = -1, _hoverDepth = 1;  // the beat opened up, and how far: 1 beats, 2 eighths, 3 sixteenths
+    private int _hoverSteps;                       // in the voice staff: the line or space under the mouse, in steps above the bottom line
+    private double _hoverStaffTop;                 // and the top line of that staff, in points
     private readonly List<(Button Dot, int Position, int Level, int Beat)> _hoverDots = [];
     // The chord row's shape shown with the place last pointed at: it stays while the mouse goes up to it in that bar.
     private (int Page, int Bar, int Position)? _hoverChord;
     private Button? _hoverChordPlus;
 
-    /// <summary>Finds the bar of the rhythm staff under the mouse; a new one gets its places.</summary>
+    private const double Space = 5.6;               // the staff space the pages are drawn with, in points
+    private const int BottomLine = 4 * 7 + 2;       // E4, the bottom line of the voice staff (as Pitch.Diatonic)
+
+    /// <summary>Finds the bar of the rhythm or voice staff under the mouse; a new one gets its places.</summary>
     private void Overlay_MouseMove(object sender, MouseEventArgs e)
     {
-        if (_engraved is null || _score?.Rhythm is null || sender is not Canvas overlay) return;
+        if (_engraved is null || _score is null || sender is not Canvas overlay) return;
         int page = (int)overlay.Tag;
         var at = e.GetPosition(overlay);
         double x = at.X / Scale, y = at.Y / Scale;
         // The chord row's shape goes once the mouse leaves the bar it belongs to.
         if (_hoverChord is { } hc && (hc.Page != page || _engraved.Bars.FirstOrDefault(m => m.Bar == hc.Bar && m.Page == page) is not { } cb || x < cb.X || x >= cb.X + cb.Width))
             SetHoverChord(null);
-        var band = _engraved.Bands.FirstOrDefault(b => b.Page == page && b.Lane == LaneKind.Rhythm && y >= b.Top && y <= b.Bottom);
+        var band = _engraved.Bands.FirstOrDefault(b => b.Page == page && b.Lane == LaneKind.Rhythm && _score.Rhythm is not null && y >= b.Top && y <= b.Bottom)
+                   ?? _engraved.Bands.FirstOrDefault(b => b.Page == page && b.Lane == LaneKind.Voice && y >= b.Top && y <= b.Bottom);
         var bar = band is null ? null : _engraved.Bars.FirstOrDefault(m => m.Page == page && m.Bar >= band.FirstBar && m.Bar <= band.LastBar && x >= m.X && x < m.X + m.Width);
         int index = bar?.Bar ?? -1;
-        if (page == _hoverPage && index == _hoverBar) return;
-        (_hoverPage, _hoverBar, _hoverBeat, _hoverDepth) = (page, index, -1, 1);
+        var lane = band?.Lane ?? LaneKind.Rhythm;
+        int steps = 0;
+        if (band is { Lane: LaneKind.Voice })
+        {
+            // The line or space under the mouse (the voice staff's band starts three spaces above its top line).
+            _hoverStaffTop = band.Top + 3 * Space;
+            steps = Math.Clamp((int)Math.Round((_hoverStaffTop + 4 * Space - y) / (Space / 2)), -8, 16);
+        }
+        if (page == _hoverPage && index == _hoverBar && lane == _hoverLane)
+        {
+            // In the voice staff the shapes follow the mouse up and down, from line to space, but not while it goes
+            // up a stack of shapes (with Auto on) to pick a shorter length.
+            if (lane == LaneKind.Voice && steps != _hoverSteps && !InStack(at)) { _hoverSteps = steps; PlaceNoteDots(); }
+            return;
+        }
+        (_hoverPage, _hoverBar, _hoverLane, _hoverBeat, _hoverDepth, _hoverSteps) = (page, index, lane, -1, 1, steps);
         BuildHoverDots();
+    }
+
+    /// <summary>Whether the mouse is above the circles of a stack of shapes in the voice staff (Auto on), where the pitch holds still.</summary>
+    private bool InStack(Point at)
+    {
+        if (AutoButton.IsChecked != true) return false;
+        double circleY = PitchY(_hoverSteps);
+        return _hoverDots.Any(d => d.Dot.Visibility == Visibility.Visible && Math.Abs(Canvas.GetLeft(d.Dot) + d.Dot.Width / 2 - at.X) <= 9)
+               && at.Y < circleY - 7 && at.Y > circleY - 3 * 2.3 * Space * Scale;
+    }
+
+    /// <summary>The y on the screen of a line or space of the voice staff under the mouse.</summary>
+    private double PitchY(int steps) => (_hoverStaffTop + 4 * Space - steps * Space / 2) * Scale;
+
+    /// <summary>The note the voice staff's shapes add: the line or space under the mouse, with the key's sharp or flat or the one chosen.</summary>
+    private (int Midi, bool Flats) HoverPitch(Measure measure)
+    {
+        int? alter = SharpButton.IsChecked == true ? 1 : FlatButton.IsChecked == true ? -1 : NaturalButton.IsChecked == true ? 0 : null;
+        int midi = MelodyEdit.OnStaff(BottomLine + _hoverSteps, measure.KeySharps, alter);
+        return (midi, alter < 0);
+    }
+
+    /// <summary>Moves the voice staff's shapes to the line or space under the mouse, and says which note they add.</summary>
+    private void PlaceNoteDots()
+    {
+        if (_hoverLane != LaneKind.Voice || _score is null || _hoverBar < 0 || _hoverBar >= _score.Bars.Count) return;
+        double y = PitchY(_hoverSteps);
+        bool auto = AutoButton.IsChecked == true;
+        foreach (var d in _hoverDots)
+            Canvas.SetTop(d.Dot, y - (auto ? (d.Level - 1) * 2.3 * Space * Scale : 0) - d.Dot.Height / 2);
+        var measure = _score.Bars[_hoverBar];
+        var (midi, flats) = HoverPitch(measure);
+        Show($"Bar {measure.Number}: {Pitch.FromMidi(midi, measure.KeySharps, flats ? true : null).Name.Replace("#", "♯").Replace("b", "♭")} — click a shape to put this note there.");
     }
 
     private void SetHoverChord((int Page, int Bar, int Position)? place)
@@ -529,7 +662,9 @@ public partial class MainWindow : Window
         foreach (var d in _hoverDots) (d.Dot.Parent as Canvas)?.Children.Remove(d.Dot);
         _hoverDots.Clear();
         if (_hoverChord is not null) SetHoverChord(_hoverChord);   // put back after the overlays were drawn again
-        if (_hoverBar < 0 || _engraved is null || _score?.Rhythm is not { } lane || _hoverBar >= _score.Bars.Count || _hoverPage >= _overlays.Count) return;
+        if (_hoverBar < 0 || _engraved is null || _score is null || _hoverBar >= _score.Bars.Count || _hoverPage >= _overlays.Count) return;
+        if (_hoverLane == LaneKind.Voice) { BuildNoteDots(); return; }
+        if (_score.Rhythm is not { } lane) return;
         var bar = _engraved.Bars.FirstOrDefault(b => b.Bar == _hoverBar && b.Page == _hoverPage);
         var band = _engraved.Bands.FirstOrDefault(b => b.Page == _hoverPage && b.Lane == LaneKind.Rhythm && b.FirstBar <= _hoverBar && _hoverBar <= b.LastBar);
         if (bar is null || band is null) return;
@@ -549,7 +684,7 @@ public partial class MainWindow : Window
             {
                 if (level == own && plus.Contains((barIndex, pos))) continue;   // the selected note's shape is there already
                 double size = level switch { 1 => 13, 2 => 11, _ => 10 };
-                int length = auto ? AutoLength(lane, barIndex, pos, level, beat, measure.Length) : StrumLength;
+                int length = auto ? AutoLength(pos, level, beat, measure.Length, lane.InBar(barIndex).Select(h => h.Position)) : StrumLength;
                 var placeholder = new Placeholder(LaneKind.Rhythm, barIndex, pos);
                 string what = auto ? StrumWhat(placeholder, length) : StrumWhat(placeholder);
                 var dot = new Button { Template = ShapeTemplates[level - 1], Width = size, Height = size, Cursor = Cursors.Hand, ToolTip = what };
@@ -589,16 +724,94 @@ public partial class MainWindow : Window
     }
 
     /// <summary>
-    /// The length of a strum added with Auto on: a beat, an eighth or a sixteenth by the row (made dotted with Dot),
-    /// cut so it ends before the next strum and the bar's end, to a length there is a symbol for.
+    /// The length of a strum or note added with Auto on: a beat, an eighth or a sixteenth by the row (made dotted
+    /// with Dot), cut so it ends before the next one (whose places in the bar are <paramref name="starts"/>) and the
+    /// bar's end, to a length there is a symbol for.
     /// </summary>
-    private int AutoLength(RhythmLane lane, int bar, int position, int level, int beat, int barLength)
+    private int AutoLength(int position, int level, int beat, int barLength, IEnumerable<int> starts)
     {
         int length = level switch { 1 => beat, 2 => 2, _ => 1 };
         if (DotButton.IsChecked == true && length is 2 or 4 or 8) length = length * 3 / 2;
-        int next = lane.InBar(bar).Where(h => h.Position > position).Select(h => h.Position).DefaultIfEmpty(barLength).Min();
+        int next = starts.Where(p => p > position).DefaultIfEmpty(barLength).Min();
         int room = Math.Min(next, barLength) - position;
         return RhythmLane.Lengths.Where(l => l <= Math.Min(length, room)).DefaultIfEmpty(1).Max();
+    }
+
+    /// <summary>
+    /// The voice staff's shapes for the bar under the mouse: the same places as the rhythm staff's (circles on the
+    /// beats, opening up to squares and diamonds), on the line or space under the mouse. A click puts a note of that
+    /// pitch there (or a rest, with Rest on), not where a note starts already: that note is clicked to change it.
+    /// </summary>
+    private void BuildNoteDots()
+    {
+        if (_session is null || _engraved is null || _score is null) return;
+        var bar = _engraved.Bars.FirstOrDefault(b => b.Bar == _hoverBar && b.Page == _hoverPage);
+        if (bar is null) return;
+        var measure = _score.Bars[_hoverBar];
+        int beat = Math.Max(1, measure.Beat), barIndex = _hoverBar;
+        bool auto = AutoButton.IsChecked == true;
+        // Where the notes of this bar start (a note carried on from the bar before starts before it).
+        var starts = _session.Melody().Where(n => n.Start >= measure.Start && n.Start < measure.Start + measure.Length)
+                                      .Select(n => (int)(n.Start - measure.Start)).ToHashSet();
+        var overlay = _overlays[_hoverPage];
+        for (int pos = 0; pos < measure.Length; pos++)
+        {
+            if (starts.Contains(pos)) continue;
+            int own = pos % beat == 0 ? 1 : pos % 2 == 0 ? 2 : 3;
+            for (int level = own; level <= (auto ? 3 : own); level++)
+            {
+                double size = level switch { 1 => 13, 2 => 11, _ => 10 };
+                int length = auto ? AutoLength(pos, level, beat, measure.Length, starts) : StrumLength;
+                string name = LengthName(length);
+                string what = $"Add {Article(name)} {name}{(RestButton.IsChecked == true ? " rest" : "")} here (bar {measure.Number}, {BeatName(pos)}), on the line or space under the mouse";
+                var dot = new Button { Template = ShapeTemplates[level - 1], Width = size, Height = size, Cursor = Cursors.Hand, ToolTip = what };
+                System.Windows.Automation.AutomationProperties.SetName(dot, what);
+                int beatStart = pos - pos % beat, lvl = level, at = pos;
+                dot.MouseEnter += (_, _) =>
+                {
+                    _hoverDepth = Math.Min(3, Math.Max(lvl + 1, _hoverBeat == beatStart ? _hoverDepth : 1));
+                    _hoverBeat = beatStart;
+                    ShowHoverDots();
+                };
+                dot.Click += (_, _) =>
+                {
+                    if (auto)
+                    {
+                        // The next place of the same row stays open, for another note of this length.
+                        int end = at + length;
+                        if (end < measure.Length) { int endBeat = end - end % beat; _hoverDepth = Math.Max(lvl, _hoverBeat == endBeat ? _hoverDepth : 1); _hoverBeat = endBeat; }
+                    }
+                    AddNoteAt(barIndex, at, length);
+                };
+                Canvas.SetLeft(dot, (bar.XOf(pos) + 0.6 * Space) * Scale - size / 2);
+                overlay.Children.Add(dot);
+                _hoverDots.Add((dot, pos, level, beatStart));
+            }
+        }
+        ShowHoverDots();
+        PlaceNoteDots();
+    }
+
+    /// <summary>Puts the note under the mouse (or a rest, with Rest on) at a place of a bar, of a length.</summary>
+    private void AddNoteAt(int bar, int position, int length)
+    {
+        if (_session is null || _score is null) return;
+        var measure = _score.Bars[bar];
+        try
+        {
+            if (RestButton.IsChecked == true)
+            {
+                _session.AddRest(bar, position, length);
+                Refresh();
+                Show($"A rest put in bar {measure.Number}, {BeatName(position)}.");
+                return;
+            }
+            var (midi, flats) = HoverPitch(measure);
+            var note = _session.AddNote(bar, position, length, midi, flats);
+            Refresh();
+            Show($"Added {Article(LengthName(note.Length))} {LengthName(note.Length)}, {Pitch.FromMidi(midi, measure.KeySharps, flats ? true : null).Name}. Click it to select it: ↑ ↓ move it, Delete takes it away.");
+        }
+        catch (ArgumentOutOfRangeException ex) { Show(ex.Message.Split(" (Parameter")[0]); }
     }
 
     /// <summary>Shows the circles of each beat as far as it is opened up; a beat whose start is taken shows its next places at once.</summary>
@@ -893,7 +1106,8 @@ public partial class MainWindow : Window
                 : strum ? "click the shape above it to add a strum there." + noChord
                 : chord ? "a strum starts there already (click it to change it); the shape in the chord row adds a chord."
                 : "a strum starts there already: click it to change it." + noChord)
-                + (Placeholders.ForLyrics(_score, (v.Bar, v.Position)).Count > 0 ? " The shape under it adds words." : ""));
+                + (Placeholders.ForLyrics(_score, (v.Bar, v.Position)).Count > 0 ? " The shape under it adds words." : "")
+                + (_session?.NoteAt(v.Bar, v.Position) is not null ? " ↑ ↓ move the note, ♯ ♭ ♮ change it, Delete takes it away; right-click for its length." : ""));
         }
         else if (_selected is { Lane: LaneKind.Chords }) Show("A chord: pick another from the list to change it; Delete takes it away.");
         else if (_selected is { Lane: LaneKind.Lyrics }) Show("Words: type to change them; Delete takes them away.");
@@ -932,6 +1146,26 @@ public partial class MainWindow : Window
             Add("Change the chord…", () => ChangeChord(chord));
             menu.Items.Add(new Separator());
             Add("Delete", () => DeleteChord(chord));
+            menu.IsOpen = true;
+            e.Handled = true;
+            return;
+        }
+        if (_selected is { Lane: LaneKind.Voice } sel && _session.NoteAt(sel.Bar, sel.Position) is { } note)
+        {
+            // A note: its length, a sharp or flat, or away with it.
+            foreach (var (length, name) in new[] { (16, "a whole note"), (12, "a dotted half"), (8, "a half note"), (6, "a dotted quarter"), (4, "a quarter note"), (3, "a dotted eighth"), (2, "an eighth note"), (1, "a sixteenth note") })
+            {
+                var item = new MenuItem { Header = "Make it " + name, IsChecked = note.Length == length };
+                int l = length;
+                item.Click += (_, _) => SetNoteLength(sel, l);
+                menu.Items.Add(item);
+            }
+            menu.Items.Add(new Separator());
+            Add("Sharp (♯)", () => Accidental_Click(SharpButton, new RoutedEventArgs()));
+            Add("Flat (♭)", () => Accidental_Click(FlatButton, new RoutedEventArgs()));
+            Add("Natural (♮)", () => Accidental_Click(NaturalButton, new RoutedEventArgs()));
+            menu.Items.Add(new Separator());
+            Add("Delete (a rest in its place)", () => DeleteNote(sel));
             menu.IsOpen = true;
             e.Handled = true;
             return;
