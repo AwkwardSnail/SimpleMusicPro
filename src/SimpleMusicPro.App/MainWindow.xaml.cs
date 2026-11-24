@@ -15,8 +15,8 @@ namespace SimpleMusicPro.App;
 
 /// <summary>
 /// The window: a control panel on the left (the score's name and the staves of the stack), the pages as they will
-/// print on the right, and the toolbar with the length of the next strum. Strums are added by clicking the + signs
-/// laid over the pages; the + signs are never printed.
+/// print on the right, and the toolbar with the length of the next strum. Strums, chords and words are added by
+/// clicking the shapes (circles, squares and diamonds) laid over the pages; the shapes are never printed.
 /// </summary>
 public partial class MainWindow : Window
 {
@@ -71,7 +71,7 @@ public partial class MainWindow : Window
             if (room > 200) _zoom = Math.Clamp(room / (595.28 * 96 / 72), 0.5, 3);
             Refresh();
             Show(_session.ProjectPath is null
-                ? $"Started a score from {System.IO.Path.GetFileName(path)}. Click a note in the voice staff, then the + above it to add a strum."
+                ? $"Started a score from {System.IO.Path.GetFileName(path)}. Click a note in the voice staff, then the shape above it to add a strum."
                 : $"Opened {System.IO.Path.GetFileName(path)}.");
         }
         catch (Exception ex) when (ex is IOException or InvalidDataException or UnauthorizedAccessException)
@@ -255,6 +255,15 @@ public partial class MainWindow : Window
 
     private void Option_Click(object sender, RoutedEventArgs e) => ToolbarChanged();
 
+    private void Auto_Click(object sender, RoutedEventArgs e)
+    {
+        if (_engraved is null) return;
+        BuildHoverDots();
+        Show(AutoButton.IsChecked == true
+            ? "Auto: point at a bar of the rhythm staff. A circle adds a beat, a square an eighth, a diamond a sixteenth."
+            : "Auto off: strums take the length chosen in the toolbar.");
+    }
+
     /// <summary>A length, Dot, Rest or Accent was chosen: it changes the strum selected, if any; else it is for the next one.</summary>
     private void ToolbarChanged()
     {
@@ -270,7 +279,7 @@ public partial class MainWindow : Window
                 ? $"Only a {LengthName(changed.Length)} fits before the end of the bar, so the strum is that long."
                 : $"Changed to {Article(LengthName(changed.Length))} {LengthName(changed.Length)}{(changed.Rest ? " rest" : "")}.");
         }
-        else DrawOverlays();   // the + sign says what it will add
+        else DrawOverlays();   // the shapes say what they will add
     }
 
     /// <summary>Selects a strum and sets the toolbar to its length, dot, rest and accent, so a click there changes it.</summary>
@@ -338,7 +347,7 @@ public partial class MainWindow : Window
 
     private double Scale => _zoom * 96.0 / 72.0;
 
-    /// <summary>Draws the score again from what the session holds, and lays the + signs over it.</summary>
+    /// <summary>Draws the score again from what the session holds, and lays the shapes over it.</summary>
     private void Refresh()
     {
         UpdateTitle();
@@ -365,6 +374,8 @@ public partial class MainWindow : Window
             var overlay = new Canvas { Width = image.Width, Height = image.Height, Background = Brushes.Transparent, Tag = p };
             overlay.MouseLeftButtonDown += Overlay_MouseDown;
             overlay.MouseRightButtonDown += Overlay_RightClick;
+            overlay.MouseMove += Overlay_MouseMove;
+            overlay.MouseLeave += (_, _) => { _hoverBar = -1; SetHoverChord(null); BuildHoverDots(); };
             var page = new Grid { Margin = new Thickness(0, 0, 0, 24) };
             page.Children.Add(new Border { Child = image, BorderBrush = (Brush)FindResource("LineHoverBrush"), BorderThickness = new Thickness(1), Background = Brushes.White });
             page.Children.Add(overlay);
@@ -380,7 +391,7 @@ public partial class MainWindow : Window
         Title = (name.Length > 0 ? name + (_session!.Modified ? " *" : "") + " - " : "") + "SimpleMusic Pro";
     }
 
-    /// <summary>The selection, and the + signs where a strum can be added.</summary>
+    /// <summary>The selection, and the shapes where a strum, a chord or words can be added.</summary>
     private void DrawOverlays()
     {
         if (_engraved is null || _score is null) return;
@@ -394,52 +405,235 @@ public partial class MainWindow : Window
             _overlays[sel.Page].Children.Add(r);
         }
 
+        // A note selected puts the shape of its place (circle on a beat, square on an eighth, diamond on a sixteenth)
+        // in the rhythm staff and the chord row above it, and under it where its words go.
         (int, int)? note = _selected is { Lane: LaneKind.Voice } v ? (v.Bar, v.Position) : null;
         foreach (var plus in Placeholders.ForRhythm(_score, note))
         {
             var bar = _engraved.Bars.FirstOrDefault(b => b.Bar == plus.Bar);
             var band = _engraved.Bands.FirstOrDefault(b => b.Lane == LaneKind.Rhythm && b.FirstBar <= plus.Bar && plus.Bar <= b.LastBar);
-            if (bar is null || band is null || bar.Page != band.Page) continue;
-            // The + sits where the slash would go: on the slashes' line, at the moment's place.
-            double x = bar.XOf(plus.Position) * Scale, y = (band.Bottom - 2.2 * 5.6) * Scale;
-            var sign = PlusSign(plus);
-            Canvas.SetLeft(sign, x - 2);
-            Canvas.SetTop(sign, y - 9);
-            _overlays[bar.Page].Children.Add(sign);
+            if (bar is null || band is null || bar.Page != band.Page || _score.Rhythm is not { } lane) continue;
+            // Where the slash would go: on the slashes' line, at the moment's place.
+            var measure = _score.Bars[plus.Bar];
+            int level = LevelOf(plus.Bar, plus.Position);
+            bool auto = AutoButton.IsChecked == true;
+            int length = auto ? AutoLength(lane, plus.Bar, plus.Position, level, Math.Max(1, measure.Beat), measure.Length) : StrumLength;
+            var p = plus;
+            AddShape(_overlays[bar.Page], (bar.XOf(plus.Position) + 0.55 * 5.6) * Scale, (band.Bottom - 2.2 * 5.6) * Scale, level,
+                auto ? StrumWhat(plus, length) : StrumWhat(plus), () => { if (auto) AddStrum(p, length); else AddStrum(p); });
         }
 
-        // The chord row's +: over a note or a strum, on the beat it falls in.
+        // The chord row's place: over a note or a strum, at its very moment.
         (int, int)? moment = _selected is { Lane: LaneKind.Voice or LaneKind.Rhythm } m ? (m.Bar, m.Position) : null;
-        foreach (var plus in Placeholders.ForChords(_score, moment))
-        {
-            var bar = _engraved.Bars.FirstOrDefault(b => b.Bar == plus.Bar);
-            var band = _engraved.Bands.FirstOrDefault(b => b.Lane == LaneKind.Chords && b.FirstBar <= plus.Bar && plus.Bar <= b.LastBar);
-            if (bar is null || band is null || bar.Page != band.Page) continue;
-            // Where the diagram would stand: its middle over the note, halfway down the row.
-            double x = (bar.XOf(plus.Position) + 0.6 * 5.6) * Scale, y = (band.Top + 5.5 * 5.6) * Scale;
-            string what = $"Add a chord here (bar {_score.Bars[plus.Bar].Number}, {BeatName(plus.Position)})";
-            var sign = new Button { Template = PlusTemplate, Width = 18, Height = 18, Cursor = Cursors.Hand, ToolTip = what };
-            System.Windows.Automation.AutomationProperties.SetName(sign, what);
-            var overlay = _overlays[bar.Page];
-            var anchor = new Rect(x - 9, y - 9, 18, 18);
-            sign.Click += (_, _) => OpenChordPicker(overlay, anchor, plus.Bar, plus.Position, null);
-            Canvas.SetLeft(sign, x - 9);
-            Canvas.SetTop(sign, y - 9);
-            overlay.Children.Add(sign);
-        }
+        foreach (var plus in Placeholders.ForChords(_score, moment)) AddChordPlace(plus.Bar, plus.Position);
 
-        // The words' +: under the note, where its syllable would be written.
+        // The words' place: under the note, where its syllable would be written.
         foreach (var plus in Placeholders.ForLyrics(_score, note))
         {
             if (LyricPlace(plus.Bar, plus.Position) is not { } at) continue;
-            string what = $"Add words here (bar {_score.Bars[plus.Bar].Number}, {BeatName(plus.Position)})";
-            var sign = new Button { Template = PlusTemplate, Width = 18, Height = 18, Cursor = Cursors.Hand, ToolTip = what };
-            System.Windows.Automation.AutomationProperties.SetName(sign, what);
-            sign.Click += (_, _) => OpenLyricEditor(plus.Bar, plus.Position);
-            Canvas.SetLeft(sign, at.X - 9);
-            Canvas.SetTop(sign, at.Y - 9);
-            _overlays[at.Page].Children.Add(sign);
+            var p = plus;
+            AddShape(_overlays[at.Page], at.X, at.Y, LevelOf(plus.Bar, plus.Position),
+                $"Add words here (bar {_score.Bars[plus.Bar].Number}, {BeatName(plus.Position)})", () => OpenLyricEditor(p.Bar, p.Position));
         }
+
+        BuildHoverDots();
+    }
+
+    /// <summary>The row a place in a bar belongs to: 1 on a beat, 2 on an eighth, 3 on a sixteenth.</summary>
+    private int LevelOf(int bar, int position)
+    {
+        int beat = Math.Max(1, _score!.Bars[bar].Beat);
+        return position % beat == 0 ? 1 : position % 2 == 0 ? 2 : 3;
+    }
+
+    /// <summary>
+    /// A place's shape, as a button (so it can also be reached with the keyboard and read out): a circle, square or
+    /// diamond by its row, centred at (x, y).
+    /// </summary>
+    private static Button AddShape(Canvas overlay, double x, double y, int level, string what, Action click)
+    {
+        double size = level switch { 1 => 13, 2 => 11, _ => 10 };
+        var shape = new Button { Template = ShapeTemplates[level - 1], Width = size, Height = size, Cursor = Cursors.Hand, ToolTip = what };
+        System.Windows.Automation.AutomationProperties.SetName(shape, what);
+        shape.Click += (_, _) => click();
+        Canvas.SetLeft(shape, x - size / 2);
+        Canvas.SetTop(shape, y - size / 2);
+        overlay.Children.Add(shape);
+        return shape;
+    }
+
+    /// <summary>The chord row's place at a moment, where the diagram would stand: its middle over the note, halfway down the row.</summary>
+    private Button? AddChordPlace(int barIndex, int position)
+    {
+        if (_engraved is null || _score is null) return null;
+        var bar = _engraved.Bars.FirstOrDefault(b => b.Bar == barIndex);
+        var band = _engraved.Bands.FirstOrDefault(b => b.Lane == LaneKind.Chords && b.FirstBar <= barIndex && barIndex <= b.LastBar);
+        if (bar is null || band is null || bar.Page != band.Page || bar.Page >= _overlays.Count) return null;
+        double x = (bar.XOf(position) + 0.6 * 5.6) * Scale, y = (band.Top + 5.5 * 5.6) * Scale;
+        var overlay = _overlays[bar.Page];
+        var anchor = new Rect(x - 9, y - 9, 18, 18);
+        var sign = AddShape(overlay, x, y, LevelOf(barIndex, position), $"Add a chord here (bar {_score.Bars[barIndex].Number}, {BeatName(position)})",
+            () => OpenChordPicker(overlay, anchor, barIndex, position, null));
+        return sign;
+    }
+
+    // ------------------------------------------------------------------ the places of a bar under the mouse
+
+    private int _hoverPage = -1, _hoverBar = -1;   // the bar of the rhythm staff under the mouse, or -1
+    private int _hoverBeat = -1, _hoverDepth = 1;  // the beat opened up, and how far: 1 beats, 2 eighths, 3 sixteenths
+    private readonly List<(Button Dot, int Position, int Level, int Beat)> _hoverDots = [];
+    // The chord row's shape shown with the place last pointed at: it stays while the mouse goes up to it in that bar.
+    private (int Page, int Bar, int Position)? _hoverChord;
+    private Button? _hoverChordPlus;
+
+    /// <summary>Finds the bar of the rhythm staff under the mouse; a new one gets its places.</summary>
+    private void Overlay_MouseMove(object sender, MouseEventArgs e)
+    {
+        if (_engraved is null || _score?.Rhythm is null || sender is not Canvas overlay) return;
+        int page = (int)overlay.Tag;
+        var at = e.GetPosition(overlay);
+        double x = at.X / Scale, y = at.Y / Scale;
+        // The chord row's shape goes once the mouse leaves the bar it belongs to.
+        if (_hoverChord is { } hc && (hc.Page != page || _engraved.Bars.FirstOrDefault(m => m.Bar == hc.Bar && m.Page == page) is not { } cb || x < cb.X || x >= cb.X + cb.Width))
+            SetHoverChord(null);
+        var band = _engraved.Bands.FirstOrDefault(b => b.Page == page && b.Lane == LaneKind.Rhythm && y >= b.Top && y <= b.Bottom);
+        var bar = band is null ? null : _engraved.Bars.FirstOrDefault(m => m.Page == page && m.Bar >= band.FirstBar && m.Bar <= band.LastBar && x >= m.X && x < m.X + m.Width);
+        int index = bar?.Bar ?? -1;
+        if (page == _hoverPage && index == _hoverBar) return;
+        (_hoverPage, _hoverBar, _hoverBeat, _hoverDepth) = (page, index, -1, 1);
+        BuildHoverDots();
+    }
+
+    private void SetHoverChord((int Page, int Bar, int Position)? place)
+    {
+        if (place == _hoverChord && (_hoverChordPlus?.Parent is not null || place is null)) return;
+        if (_hoverChordPlus?.Parent is Canvas c) c.Children.Remove(_hoverChordPlus);
+        _hoverChordPlus = null;
+        _hoverChord = place;
+        // Not when the chord row's shape of a selected note stands there already, nor where no chord may go.
+        if (place is not { } p || _score is null) return;
+        (int, int)? moment = _selected is { Lane: LaneKind.Voice or LaneKind.Rhythm } m ? (m.Bar, m.Position) : null;
+        if (Placeholders.ForChords(_score, moment).Any(x => x.Bar == p.Bar && x.Position == p.Position)) return;
+        if (Placeholders.ForChords(_score, (p.Bar, p.Position)).Count == 0) return;
+        _hoverChordPlus = AddChordPlace(p.Bar, p.Position);
+    }
+
+    /// <summary>
+    /// Lays faint shapes over the bar under the mouse at the places a strum can start (not where one starts already):
+    /// circles on the beats; pointing at one shows its beat's eighths (squares), and pointing at one of those its
+    /// sixteenths (diamonds). With Auto on, the shape is the length (circle a beat, square an eighth, diamond a
+    /// sixteenth), and each opened row covers the whole beat, so any length can start at any of its places.
+    /// </summary>
+    private void BuildHoverDots()
+    {
+        foreach (var d in _hoverDots) (d.Dot.Parent as Canvas)?.Children.Remove(d.Dot);
+        _hoverDots.Clear();
+        if (_hoverChord is not null) SetHoverChord(_hoverChord);   // put back after the overlays were drawn again
+        if (_hoverBar < 0 || _engraved is null || _score?.Rhythm is not { } lane || _hoverBar >= _score.Bars.Count || _hoverPage >= _overlays.Count) return;
+        var bar = _engraved.Bars.FirstOrDefault(b => b.Bar == _hoverBar && b.Page == _hoverPage);
+        var band = _engraved.Bands.FirstOrDefault(b => b.Page == _hoverPage && b.Lane == LaneKind.Rhythm && b.FirstBar <= _hoverBar && _hoverBar <= b.LastBar);
+        if (bar is null || band is null) return;
+        var measure = _score.Bars[_hoverBar];
+        int beat = Math.Max(1, measure.Beat), barIndex = _hoverBar, page = _hoverPage;
+        bool auto = AutoButton.IsChecked == true;
+        (int, int)? note = _selected is { Lane: LaneKind.Voice } v ? (v.Bar, v.Position) : null;
+        var plus = Placeholders.ForRhythm(_score, note).Select(p => (p.Bar, p.Position)).ToHashSet();
+        var overlay = _overlays[page];
+        double y = (band.Bottom - 2.2 * 5.6) * Scale;
+        for (int pos = 0; pos < measure.Length; pos++)
+        {
+            if (lane.At(barIndex, pos)?.Position == pos) continue;   // a strum starts there
+            int own = pos % beat == 0 ? 1 : pos % 2 == 0 ? 2 : 3;   // the longest row this place belongs to
+            // Without Auto, one shape for each place; with it, every row the place is on (a beat's start is on all three).
+            for (int level = own; level <= (auto ? 3 : own); level++)
+            {
+                if (level == own && plus.Contains((barIndex, pos))) continue;   // the selected note's shape is there already
+                double size = level switch { 1 => 13, 2 => 11, _ => 10 };
+                int length = auto ? AutoLength(lane, barIndex, pos, level, beat, measure.Length) : StrumLength;
+                var placeholder = new Placeholder(LaneKind.Rhythm, barIndex, pos);
+                string what = auto ? StrumWhat(placeholder, length) : StrumWhat(placeholder);
+                var dot = new Button { Template = ShapeTemplates[level - 1], Width = size, Height = size, Cursor = Cursors.Hand, ToolTip = what };
+                System.Windows.Automation.AutomationProperties.SetName(dot, what);
+                int beatStart = pos - pos % beat, lvl = level, at = pos;
+                dot.MouseEnter += (_, _) =>
+                {
+                    // A shape opens up the shorter places of its beat (keeping what is open there already),
+                    // and offers the chord row's shape above it.
+                    _hoverDepth = Math.Min(3, Math.Max(lvl + 1, _hoverBeat == beatStart ? _hoverDepth : 1));
+                    _hoverBeat = beatStart;
+                    ShowHoverDots();
+                    SetHoverChord((page, barIndex, at));
+                };
+                dot.Click += (_, _) =>
+                {
+                    if (!auto) { AddStrum(placeholder); return; }
+                    // The next place of the same row stays open, for another strum of this length.
+                    int end = at + length;
+                    if (end < measure.Length && _hoverBar == barIndex)
+                    {
+                        int endBeat = end - end % beat;
+                        _hoverDepth = Math.Max(lvl, _hoverBeat == endBeat ? _hoverDepth : 1);
+                        _hoverBeat = endBeat;
+                    }
+                    AddStrum(placeholder, length);
+                };
+                // Rows one above another: circles on the slashes' line, squares above them, diamonds above those.
+                double rowY = y - (auto ? (level - 1) * 2.3 * 5.6 * Scale : 0);
+                Canvas.SetLeft(dot, (bar.XOf(pos) + 0.55 * 5.6) * Scale - size / 2);
+                Canvas.SetTop(dot, rowY - size / 2);
+                overlay.Children.Add(dot);
+                _hoverDots.Add((dot, pos, level, beatStart));
+            }
+        }
+        ShowHoverDots();
+    }
+
+    /// <summary>
+    /// The length of a strum added with Auto on: a beat, an eighth or a sixteenth by the row (made dotted with Dot),
+    /// cut so it ends before the next strum and the bar's end, to a length there is a symbol for.
+    /// </summary>
+    private int AutoLength(RhythmLane lane, int bar, int position, int level, int beat, int barLength)
+    {
+        int length = level switch { 1 => beat, 2 => 2, _ => 1 };
+        if (DotButton.IsChecked == true && length is 2 or 4 or 8) length = length * 3 / 2;
+        int next = lane.InBar(bar).Where(h => h.Position > position).Select(h => h.Position).DefaultIfEmpty(barLength).Min();
+        int room = Math.Min(next, barLength) - position;
+        return RhythmLane.Lengths.Where(l => l <= Math.Min(length, room)).DefaultIfEmpty(1).Max();
+    }
+
+    /// <summary>Shows the circles of each beat as far as it is opened up; a beat whose start is taken shows its next places at once.</summary>
+    private void ShowHoverDots()
+    {
+        foreach (var beat in _hoverDots.Select(d => d.Beat).Distinct())
+        {
+            int depth = beat == _hoverBeat ? _hoverDepth : 1;
+            while (depth < 3 && !_hoverDots.Any(d => d.Beat == beat && d.Level <= depth)) depth++;
+            foreach (var d in _hoverDots.Where(d => d.Beat == beat))
+                d.Dot.Visibility = d.Level <= depth ? Visibility.Visible : Visibility.Collapsed;
+        }
+    }
+
+    /// <summary>The shapes of the places: a circle on a beat, a square on an eighth, a diamond on a sixteenth.</summary>
+    private static readonly ControlTemplate[] ShapeTemplates = [MakeShapeTemplate(null), MakeShapeTemplate("M0,0 L1,0 L1,1 L0,1 Z"), MakeShapeTemplate("M0.5,0 L1,0.5 L0.5,1 L0,0.5 Z")];
+
+    private static ControlTemplate MakeShapeTemplate(string? outline)
+    {
+        FrameworkElementFactory ring;
+        if (outline is null) ring = new FrameworkElementFactory(typeof(Ellipse), "Ring");
+        else
+        {
+            ring = new FrameworkElementFactory(typeof(System.Windows.Shapes.Path), "Ring");
+            ring.SetValue(System.Windows.Shapes.Path.DataProperty, Geometry.Parse(outline));
+            ring.SetValue(Shape.StretchProperty, Stretch.Fill);
+        }
+        ring.SetValue(Shape.FillProperty, new SolidColorBrush(Color.FromArgb(55, 0x2E, 0x9E, 0x4A)));
+        ring.SetValue(Shape.StrokeProperty, new SolidColorBrush(Color.FromArgb(150, 0x2E, 0x9E, 0x4A)));
+        ring.SetValue(Shape.StrokeThicknessProperty, 1.0);
+        var template = new ControlTemplate(typeof(Button)) { VisualTree = ring };
+        var hover = new Trigger { Property = UIElement.IsMouseOverProperty, Value = true };
+        hover.Setters.Add(new Setter(Shape.FillProperty, new SolidColorBrush(Color.FromArgb(150, 0x2E, 0x9E, 0x4A)), "Ring"));
+        template.Triggers.Add(hover);
+        return template;
     }
 
     /// <summary>Where a syllable of a note is written on the screen: its page, and the middle of its place.</summary>
@@ -635,46 +829,32 @@ public partial class MainWindow : Window
         OpenChordPicker(_overlays[chord.Page], new Rect(b.X * Scale, b.Y * Scale, b.Width * Scale, b.Height * Scale), chord.Bar, chord.Position, mark.Name);
     }
 
-    private static readonly ControlTemplate PlusTemplate = MakePlusTemplate();
-
-    private static ControlTemplate MakePlusTemplate()
+    /// <summary>What clicking a shape of the rhythm staff adds, for its tooltip.</summary>
+    private string StrumWhat(Placeholder plus, int? sixteenths = null)
     {
-        var ring = new FrameworkElementFactory(typeof(Border));
-        ring.SetValue(Border.CornerRadiusProperty, new CornerRadius(9));
-        ring.SetValue(Border.BackgroundProperty, new SolidColorBrush(Color.FromArgb(225, 255, 255, 255)));
-        ring.SetValue(Border.BorderBrushProperty, Green);
-        ring.SetValue(Border.BorderThicknessProperty, new Thickness(1.5));
-        var text = new FrameworkElementFactory(typeof(TextBlock));
-        text.SetValue(TextBlock.TextProperty, "+");
-        text.SetValue(TextBlock.ForegroundProperty, Green);
-        text.SetValue(TextBlock.FontSizeProperty, 15.0);
-        text.SetValue(TextBlock.FontWeightProperty, FontWeights.Bold);
-        text.SetValue(FrameworkElement.HorizontalAlignmentProperty, HorizontalAlignment.Center);
-        text.SetValue(FrameworkElement.VerticalAlignmentProperty, VerticalAlignment.Center);
-        text.SetValue(FrameworkElement.MarginProperty, new Thickness(0, -3, 0, 0));
-        ring.AppendChild(text);
-        return new ControlTemplate(typeof(Button)) { VisualTree = ring };
+        string length = LengthName(sixteenths ?? StrumLength);
+        return $"Add {Article(length)} {length}{(RestButton.IsChecked == true ? " rest" : " strum")} here (bar {_score!.Bars[plus.Bar].Number}, {BeatName(plus.Position)})";
     }
 
-    private FrameworkElement PlusSign(Placeholder plus)
-    {
-        // A button (drawn as a small ringed +), so it can also be reached with the keyboard and read out.
-        string length = LengthName(StrumLength);
-        string what = $"Add {Article(length)} {length}{(RestButton.IsChecked == true ? " rest" : " strum")} here (bar {_score!.Bars[plus.Bar].Number}, {BeatName(plus.Position)})";
-        var sign = new Button { Template = PlusTemplate, Width = 18, Height = 18, Cursor = Cursors.Hand, ToolTip = what };
-        System.Windows.Automation.AutomationProperties.SetName(sign, what);
-        sign.Click += (_, _) => AddStrum(plus);
-        return sign;
-    }
-
-    private void AddStrum(Placeholder plus)
+    /// <param name="autoLength">With Auto on: the length the shape clicked stands for (else the toolbar's length).</param>
+    private void AddStrum(Placeholder plus, int? autoLength = null)
     {
         if (_session is null || _score is null) return;
-        int length = StrumLength;
+        int length = autoLength ?? StrumLength;
         try
         {
             var cut = _score.Rhythm?.At(plus.Bar, plus.Position);   // a strum sounding on there is shortened by the new one
             var added = _session.AddStrum(plus.Bar, plus.Position, length, RestButton.IsChecked == true, RestButton.IsChecked != true && AccentButton.IsChecked == true);
+            if (autoLength is not null)
+            {
+                // Not selected, so the toolbar keeps its settings (a selected strum would set them to its own).
+                _selected = null;
+                Refresh();
+                Show(cut is not null
+                    ? $"Added {Article(LengthName(added.Length))} {LengthName(added.Length)}; the strum before it now ends where this one starts."
+                    : $"Added {Article(LengthName(added.Length))} {LengthName(added.Length)}. The same shape after it adds another.");
+                return;
+            }
             Refresh();
             SelectStrum(added);   // selected, so a length chosen now changes it
             if (added.Length < length) Show($"Only a {LengthName(added.Length)} fits before the end of the bar, so the strum is that long.");
@@ -709,11 +889,11 @@ public partial class MainWindow : Window
             string where = $"Bar {_score!.Bars[v.Bar].Number}, {BeatName(v.Position)}: ";
             bool strum = Placeholders.ForRhythm(_score, (v.Bar, v.Position)).Count > 0, chord = Placeholders.ForChords(_score, (v.Bar, v.Position)).Count > 0;
             string noChord = _score.Chords is null ? "" : " (No chord here: one stands within a quarter note of it.)";
-            Show(where + (strum && chord ? "click a + above it to add a strum or a chord there."
-                : strum ? "click the + above it to add a strum there." + noChord
-                : chord ? "a strum starts there already (click it to change it); the + in the chord row adds a chord."
+            Show(where + (strum && chord ? "click a shape above it to add a strum or a chord there."
+                : strum ? "click the shape above it to add a strum there." + noChord
+                : chord ? "a strum starts there already (click it to change it); the shape in the chord row adds a chord."
                 : "a strum starts there already: click it to change it." + noChord)
-                + (Placeholders.ForLyrics(_score, (v.Bar, v.Position)).Count > 0 ? " The + under it adds words." : ""));
+                + (Placeholders.ForLyrics(_score, (v.Bar, v.Position)).Count > 0 ? " The shape under it adds words." : ""));
         }
         else if (_selected is { Lane: LaneKind.Chords }) Show("A chord: pick another from the list to change it; Delete takes it away.");
         else if (_selected is { Lane: LaneKind.Lyrics }) Show("Words: type to change them; Delete takes them away.");

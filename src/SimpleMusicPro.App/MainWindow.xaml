@@ -27,6 +27,8 @@
                 <Button x:Name="RedoButton" Content="Redo" Click="Redo_Click" ToolTip="Redo (Ctrl+Y)" />
                 <Border Style="{StaticResource ToolSeparator}" />
                 <TextBlock Text="Strum:" VerticalAlignment="Center" Margin="4,0,6,0" />
+                <ToggleButton x:Name="AutoButton" Content="Auto" Checked="Auto_Click" Unchecked="Auto_Click"
+                              ToolTip="The length comes from the shape clicked in a bar: a circle a beat, a square an eighth, a diamond a sixteenth" />
                 <RadioButton Style="{StaticResource ToolRadio}" GroupName="Length" Tag="16" Content="Whole" Checked="Length_Checked" ToolTip="A strum that lasts the whole bar" />
                 <RadioButton Style="{StaticResource ToolRadio}" GroupName="Length" Tag="8" Content="Half" Checked="Length_Checked" ToolTip="A strum of a half note" />
                 <RadioButton x:Name="QuarterButton" Style="{StaticResource ToolRadio}" GroupName="Length" Tag="4" Content="Quarter" IsChecked="True" Checked="Length_Checked" ToolTip="A strum of a quarter note" />
@@ -71,17 +73,26 @@
                                 Click="TakeWords_Click" ToolTip="Put the song's words from the MIDI file on the notes again, in the place of the words there" />
 
                         <TextBlock TextWrapping="Wrap" Foreground="{StaticResource GreenDimBrush}" Margin="0,8,0,0">
-                            To add a strum, click a note in the voice staff: a + appears above it. Choose a length
-                            in the toolbar, then click the +. Click a strum to select it; a length, Dot, Rest or
-                            Accent chosen then changes it. Right-click a strum for more, or press Delete.
+                            Places to add things show as shapes: a circle on a beat, a square on an eighth, a diamond
+                            on a sixteenth. Click a note in the voice staff and its shape appears above it, in the
+                            rhythm staff and the chord row, and under it for words.
                         </TextBlock>
                         <TextBlock TextWrapping="Wrap" Foreground="{StaticResource GreenDimBrush}" Margin="0,10,0,0">
-                            To add a chord, click a note or a strum: a + appears above it in the chord row. Click
-                            the + and pick a chord from the list, or type its name to find it. Chords stand at least
-                            a quarter note apart. Click a chord to change it; Delete takes it away.
+                            To add a strum, choose a length in the toolbar and click a shape in the rhythm staff. Or
+                            point at a bar of the rhythm staff: circles show its beats. Point at a circle to show the
+                            beat's eighths, and at a square to show its sixteenths. With Auto on, the shape is the
+                            length: a circle a beat, a square an eighth, a diamond a sixteenth. Click a strum to select
+                            it; a length, Dot, Rest or Accent chosen then changes it. Right-click a strum for more, or
+                            press Delete.
                         </TextBlock>
                         <TextBlock TextWrapping="Wrap" Foreground="{StaticResource GreenDimBrush}" Margin="0,10,0,0">
-                            To add words, click a note, then the + under it, and type the syllable. Space goes on to
+                            To add a chord, click the shape in the chord row (it shows for a note or strum clicked, or
+                            a place pointed at in the rhythm staff) and pick a chord from the list, or type its name to
+                            find it. Chords stand at least a quarter note apart. Click a chord to change it; Delete
+                            takes it away.
+                        </TextBlock>
+                        <TextBlock TextWrapping="Wrap" Foreground="{StaticResource GreenDimBrush}" Margin="0,10,0,0">
+                            To add words, click a note, then the shape under it, and type the syllable. Space goes on to
                             the next note, a hyphen (-) joins the syllable to the next one, Enter finishes. Click a
                             word to change it; Delete takes it away.
                         </TextBlock>
@@ -89,7 +100,7 @@
                 </ScrollViewer>
             </Border>
 
-            <!-- The preview: the pages as they will print, with the + signs over them. -->
+            <!-- The preview: the pages as they will print, with the shapes over them. -->
             <ScrollViewer x:Name="PreviewScroll" Grid.Column="1" HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto"
                           PreviewMouseWheel="Preview_MouseWheel">
                 <Grid>
