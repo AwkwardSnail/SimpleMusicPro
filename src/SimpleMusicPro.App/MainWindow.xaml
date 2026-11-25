@@ -80,23 +80,22 @@
                                 Click="TakeWords_Click" ToolTip="Put the song's words from the MIDI file on the notes again, in the place of the words there" />
 
                         <TextBlock TextWrapping="Wrap" Foreground="{StaticResource GreenDimBrush}" Margin="0,8,0,0">
-                            Places to add things show as shapes: a circle on a beat, a square on an eighth, a diamond
-                            on a sixteenth. Click a note in the voice staff and its shape appears above it, in the
-                            rhythm staff and the chord row, and under it for words.
+                            Places to add things show as shapes. Point at a bar of the voice or rhythm staff: one large
+                            circle stands for the whole bar. Point at it to show its halves (triangles), at a half to
+                            show its beats (squares), then eighths (diamonds) and sixteenths (small dots). Click a
+                            shape to put a note or strum there: with Auto on, as long as the shape stands for; else of
+                            the length chosen in the toolbar. What starts there already is replaced.
                         </TextBlock>
                         <TextBlock TextWrapping="Wrap" Foreground="{StaticResource GreenDimBrush}" Margin="0,10,0,0">
-                            To add a note, point at a bar of the voice staff: the shapes show its places, on the line
-                            or space under the mouse. Click one to add a note there (with ♯, ♭ or ♮ if chosen). Click a
-                            note to select it: ↑ and ↓ move it, ♯ ♭ ♮ change it, Delete takes it away; right-click for
-                            its length.
+                            In the voice staff the large circle stands on the line or space under the mouse: that is the
+                            note added (with ♯, ♭ or ♮ if chosen). Click it once to pin the shapes there, then click the
+                            shape for the length you want; Esc lets go. Click a note to select it: ↑ and ↓ move it, ♯ ♭ ♮ change
+                            it, Delete takes it away; right-click for its length. A note selected also shows its shape
+                            above it, in the rhythm staff and the chord row, and under it for words.
                         </TextBlock>
                         <TextBlock TextWrapping="Wrap" Foreground="{StaticResource GreenDimBrush}" Margin="0,10,0,0">
-                            To add a strum, choose a length in the toolbar and click a shape in the rhythm staff. Or
-                            point at a bar of the rhythm staff: circles show its beats. Point at a circle to show the
-                            beat's eighths, and at a square to show its sixteenths. With Auto on, the shape is the
-                            length: a circle a beat, a square an eighth, a diamond a sixteenth. Click a strum to select
-                            it; a length, Dot, Rest or Accent chosen then changes it. Right-click a strum for more, or
-                            press Delete.
+                            Click a strum to select it; a length, Dot, Rest or Accent chosen then changes it.
+                            Right-click a strum for more, or press Delete.
                         </TextBlock>
                         <TextBlock TextWrapping="Wrap" Foreground="{StaticResource GreenDimBrush}" Margin="0,10,0,0">
                             To add a chord, click the shape in the chord row (it shows for a note or strum clicked, or

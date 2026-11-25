@@ -23,6 +23,23 @@ public class EditingTests
         Assert.Equal(6, lane.Add(0, 4, 6, 16).Length);                             // a dotted quarter
     }
 
+    [Theory]
+    [InlineData(4, 4, "0:16 | 0:8 8:8 | 0:4 4:4 8:4 12:4")]   // whole, halves, quarters
+    [InlineData(3, 4, "0:12 | 0:4 4:4 8:4 | 0:2 2:2 4:2")]      // the bar, its three beats, eighths
+    [InlineData(6, 8, "0:12 | 0:6 6:6 | 0:2 2:2 4:2")]          // two dotted quarters, three eighths each
+    public void A_bar_opens_up_from_the_whole_bar_to_its_halves_beats_eighths_and_sixteenths(int numerator, int denominator, string firstLevels)
+    {
+        var measure = new Measure(1, 0, numerator * 16 / denominator, numerator, denominator, 0, []);
+        var tree = PlaceTree.Of(measure);
+        string Level(int depth) => string.Join(" ", tree.Where(n => n.Depth == depth).Take(depth == 2 ? (numerator == 4 ? 4 : 3) : 99).Select(n => $"{n.Start}:{n.Length}"));
+        Assert.Equal(firstLevels, $"{Level(0)} | {Level(1)} | {Level(2)}");
+        Assert.All(tree.Where(n => n.Depth > 0), n => Assert.True(tree[n.Parent].Start <= n.Start && n.Start + n.Length <= tree[n.Parent].Start + tree[n.Parent].Length));
+        Assert.Equal(measure.Length, tree.Count(n => n.Length == 1));                 // down to every sixteenth
+        Assert.Equal([0, 1, 2, 3, 4], new[] { 16, 8, 4, 2, 1 }.Select(l => PlaceTree.Shape(numerator == 4 ? tree.First(n => n.Length == l) : tree[0] with { Length = l, Depth = l == 16 ? 0 : 1 })).ToArray());
+        Assert.Equal(tree[0], PlaceTree.At(tree, 0));                                // the longest place starting there
+        Assert.Equal([0, tree.IndexOf(tree.First(n => n.Depth == 1))], PlaceTree.PathTo(tree, tree.IndexOf(tree.First(n => n.Depth == 1))));
+    }
+
     [Fact]
     public void Sixteenth_strums_in_a_beat_share_a_beam()
     {
